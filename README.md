@@ -1,4 +1,4 @@
-# GrimSaver / LastStand
+# GrimSaver / UniversalKeepInv
 
 Silent client-side Fabric/Kotlin emergency death home saver based on the current LiquidBounce nextgen Minecraft/Kotlin/Fabric setup.
 
