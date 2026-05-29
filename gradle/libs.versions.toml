@@ -1,0 +1,20 @@
+[versions]
+# Values synchronized with CCBlueX/LiquidBounce nextgen at 6d9b50a9586ba157d04c46f1101e033bafaa919b.
+jdk = "25"
+minecraft = "26.1.2"
+fabric-loom = "1.16-SNAPSHOT"
+fabric-loader = "0.19.2"
+fabric-loaderMin = "0.18.4"
+fabric-api = "0.149.1+26.1.2"
+kotlin = "2.3.10"
+fabric-kotlin = "1.13.9+kotlin.2.3.10"
+
+[libraries]
+minecraft = { group = "com.mojang", name = "minecraft", version.ref = "minecraft" }
+fabric-loader = { group = "net.fabricmc", name = "fabric-loader", version.ref = "fabric-loader" }
+fabric-api = { group = "net.fabricmc.fabric-api", name = "fabric-api", version.ref = "fabric-api" }
+fabric-kotlin = { group = "net.fabricmc", name = "fabric-language-kotlin", version.ref = "fabric-kotlin" }
+
+[plugins]
+fabric-loom = { id = "net.fabricmc.fabric-loom", version.ref = "fabric-loom" }
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
