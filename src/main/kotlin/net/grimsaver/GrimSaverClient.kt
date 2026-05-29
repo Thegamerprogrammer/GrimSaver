@@ -23,6 +23,8 @@ object GrimSaverClient : ClientModInitializer {
     internal lateinit var homeManager: HomeManager
     private lateinit var chatManager: ChatManager
     private lateinit var threatDetector: ThreatDetector
+    private val emergencyDetector = EmergencyDetector()
+    private val triggerGate = ThreatTriggerGate()
 
     override fun onInitializeClient() {
         GrimSaverConfig.load()
@@ -39,27 +41,49 @@ object GrimSaverClient : ClientModInitializer {
     private fun onClientTick(client: Minecraft) {
         val player = client.player ?: return
         val level = client.level ?: return
-        if (!GrimSaverConfig.enabled || !player.isAlive) return
+        triggerGate.observe(client)
+        if (!GrimSaverConfig.enabled) return
 
         tickCounter++
         if (tickCounter % GrimSaverConfig.scanEveryTicks != 0) return
         if (!detectionRunning.compareAndSet(false, true)) return
 
-        val snapshot = SnapshotFactory.capture(client, level, player)
+        val snapshot = try {
+            SnapshotFactory.capture(client, level, player)
+        } catch (throwable: Throwable) {
+            warnGrimSaverFailure("snapshot-capture", "GrimSaver snapshot capture failed; skipping this tick", throwable)
+            detectionRunning.set(false)
+            return
+        }
+        emergencyDetector.detect(client, snapshot)?.let { emergency ->
+            triggerThreat(client, emergency)
+            if (!player.isAlive) return
+        }
+
+        if (!player.isAlive) return
+
         executor.execute {
             try {
                 threatDetector.detect(snapshot)?.let { threat ->
-                    client.execute {
-                        homeManager.tryTrigger(client, threat)?.let { savedHome ->
-                            chatManager.announceSavedHome(client, savedHome)
-                        }
-                    }
+                    client.execute { triggerThreat(client, threat) }
                 }
             } catch (throwable: Throwable) {
                 logger.warn("Threat scan failed", throwable)
             } finally {
                 detectionRunning.set(false)
             }
+        }
+    }
+
+    private fun triggerThreat(client: Minecraft, threat: Threat) {
+        try {
+            if (!triggerGate.canTrigger(threat)) return
+            homeManager.tryTrigger(client, threat)?.let { savedHome ->
+                triggerGate.markTriggered(threat)
+                chatManager.announceSavedHome(client, savedHome)
+            }
+        } catch (throwable: Throwable) {
+            warnGrimSaverFailure("threat-trigger", "GrimSaver failed while handling a detected threat; continuing safely", throwable)
         }
     }
 

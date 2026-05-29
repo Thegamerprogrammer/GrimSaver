@@ -14,7 +14,14 @@ enum class ThreatKind(val id: String, val displayName: String) {
     MELEE_PLAYER("melee_player", "Melee Player"),
     MELEE_MOB("melee_mob", "Melee Mob"),
     FALL_DAMAGE("fall_damage", "Fall Damage"),
-    COMBINED("combined", "Combined Damage")
+    COMBINED("combined", "Combined Damage"),
+    CRITICAL_HEALTH("critical_health", "Critical Health"),
+    CREEPER_EMERGENCY("creeper_emergency", "Creeper Emergency"),
+    SWARM_EMERGENCY("swarm_emergency", "Swarm Emergency"),
+    DEATH_FAILSAFE("death_failsafe", "Death Failsafe"),
+    CRITICAL_DAMAGE("critical_damage", "Critical Damage"),
+    BURST_DAMAGE("burst_damage", "Burst Damage"),
+    PASSIVE_ENTITY_DANGER("passive_entity_danger", "Passive Entity Danger")
 }
 
 data class Threat(
@@ -23,6 +30,7 @@ data class Threat(
     val health: Double,
     val source: String,
     val reason: String,
+    val confidence: Double,
     val ticksUntilImpact: Int = 0,
     val position: Vec3
 ) {
@@ -53,6 +61,7 @@ data class PlayerSnapshot(
     val absorption: Double,
     val armor: Double,
     val armorToughness: Double,
+    val maxHealth: Double,
     val armorStacks: List<ItemStack>,
     val fallDistance: Float,
     val safeFallDistance: Double,
@@ -86,8 +95,16 @@ data class LivingSnapshot(
     val mainHand: ItemStack,
     val armorStacks: List<ItemStack>,
     val attackDamage: Double,
+    val attackSpeed: Double,
+    val movementSpeed: Double,
+    val followRange: Double,
+    val knockbackResistance: Double,
+    val maxHealth: Double,
     val isPlayer: Boolean,
     val isMob: Boolean,
+    val isEnemy: Boolean,
+    val isCreeper: Boolean,
+    val creeperSwelling: Boolean,
     val targetId: Int?,
     val attackRange: Double
 )
