@@ -6,5 +6,5 @@ out/
 .idea/
 .DS_Store
 
-# Keep the wrapper binary local when the repository already provides one.
+# Do not commit the wrapper binary in this repository.
 gradle/wrapper/gradle-wrapper.jar

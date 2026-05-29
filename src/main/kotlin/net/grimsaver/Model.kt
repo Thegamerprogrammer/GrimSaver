@@ -23,6 +23,7 @@ data class Threat(
     val health: Double,
     val source: String,
     val reason: String,
+    val confidence: Double,
     val ticksUntilImpact: Int = 0,
     val position: Vec3
 ) {
@@ -53,6 +54,7 @@ data class PlayerSnapshot(
     val absorption: Double,
     val armor: Double,
     val armorToughness: Double,
+    val maxHealth: Double,
     val armorStacks: List<ItemStack>,
     val fallDistance: Float,
     val safeFallDistance: Double,
@@ -86,6 +88,11 @@ data class LivingSnapshot(
     val mainHand: ItemStack,
     val armorStacks: List<ItemStack>,
     val attackDamage: Double,
+    val attackSpeed: Double,
+    val movementSpeed: Double,
+    val followRange: Double,
+    val knockbackResistance: Double,
+    val maxHealth: Double,
     val isPlayer: Boolean,
     val isMob: Boolean,
     val targetId: Int?,
