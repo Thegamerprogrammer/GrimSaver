@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "grimsaver",
+  "version": "${version}",
+  "name": "GrimSaver",
+  "description": "Silent client-side emergency death home saver.",
+  "authors": ["GrimSaver contributors"],
+  "contact": {
+    "sources": "https://github.com/CCBlueX/LiquidBounce"
+  },
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      {
+        "adapter": "kotlin",
+        "value": "net.grimsaver.GrimSaverClient"
+      }
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "fabric-language-kotlin": ">=${fabric_kotlin_version}",
+    "fabric-api": ">=${fabric_version}",
+    "minecraft": "${minecraft_version}"
+  }
+}
