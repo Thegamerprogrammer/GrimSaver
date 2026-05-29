@@ -77,27 +77,30 @@ object DamagePredictor {
     }
 
     private fun potionDamage(stack: ItemStack): Double {
-        val contents = stack[DataComponents.POTION_CONTENTS] ?: return 0.0
-        var damage = 0.0
-        for (effect in contents.allEffects) {
-            when {
-                effect.`is`(MobEffects.INSTANT_DAMAGE) -> damage += 6.0 * (effect.amplifier + 1)
-                effect.`is`(MobEffects.POISON) -> damage += min(8.0, 2.0 + effect.amplifier * 2.0)
-                effect.`is`(MobEffects.WITHER) -> damage += min(12.0, 4.0 + effect.amplifier * 3.0)
-                effect.`is`(MobEffects.WEAKNESS) -> damage += 1.0
+        return runCatching {
+            val contents = stack[DataComponents.POTION_CONTENTS] ?: return 0.0
+            var damage = 0.0
+            for (effect in contents.allEffects) {
+                when {
+                    effect.`is`(MobEffects.INSTANT_DAMAGE) -> damage += 6.0 * (effect.amplifier + 1)
+                    effect.`is`(MobEffects.POISON) -> damage += min(8.0, 2.0 + effect.amplifier * 2.0)
+                    effect.`is`(MobEffects.WITHER) -> damage += min(12.0, 4.0 + effect.amplifier * 3.0)
+                    effect.`is`(MobEffects.WEAKNESS) -> damage += 1.0
+                }
             }
-        }
-        return damage
+            damage
+        }.getOrDefault(0.0)
     }
 
     private fun fireworkDamage(stack: ItemStack, shooterWeapon: ItemStack?): Double {
-        val explosions = stack[DataComponents.FIREWORKS]?.explosions()?.size ?: 1
+        val explosions = runCatching { stack[DataComponents.FIREWORKS]?.explosions()?.size ?: 1 }.getOrDefault(1)
         return 5.0 + explosions * 2.0 + shooterWeapon.level(Enchantments.MULTISHOT)
     }
 
     private fun itemAttackDamage(stack: ItemStack): Double {
-        val componentDamage = stack[DataComponents.ATTRIBUTE_MODIFIERS]
-            ?.compute(Attributes.ATTACK_DAMAGE, 1.0, EquipmentSlot.MAINHAND)
+        val componentDamage = runCatching {
+            stack[DataComponents.ATTRIBUTE_MODIFIERS]?.compute(Attributes.ATTACK_DAMAGE, 1.0, EquipmentSlot.MAINHAND)
+        }.getOrNull()
         if (componentDamage != null && componentDamage > 1.0) return componentDamage
         return when (stack.item) {
             Items.WOODEN_SWORD, Items.GOLDEN_SWORD -> 4.0

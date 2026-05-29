@@ -14,14 +14,16 @@ object EnchantmentLevels {
     fun ItemStack?.level(enchantment: ResourceKey<Enchantment>): Int {
         if (this == null || this.isEmpty) return 0
         val holder = enchantment.holder() ?: return 0
-        return EnchantmentHelper.getItemEnchantmentLevel(holder, this)
+        return runCatching { EnchantmentHelper.getItemEnchantmentLevel(holder, this) }.getOrDefault(0)
     }
 
     fun ItemStack?.hasComponentNbt(): Boolean {
         if (this == null || this.isEmpty) return false
-        return this[DataComponents.CUSTOM_DATA] != null || this[DataComponents.ENCHANTMENTS] != null ||
-            this[DataComponents.STORED_ENCHANTMENTS] != null || this[DataComponents.POTION_CONTENTS] != null ||
-            this[DataComponents.FIREWORKS] != null
+        return runCatching {
+            this[DataComponents.CUSTOM_DATA] != null || this[DataComponents.ENCHANTMENTS] != null ||
+                this[DataComponents.STORED_ENCHANTMENTS] != null || this[DataComponents.POTION_CONTENTS] != null ||
+                this[DataComponents.FIREWORKS] != null
+        }.getOrDefault(false)
     }
 
     fun ItemStack?.describeCombatEnchantments(): String {
@@ -44,7 +46,7 @@ object EnchantmentLevels {
     fun ItemStack?.displayNameForReason(): String {
         if (this == null || this.isEmpty) return "unknown item"
         val enchants = describeCombatEnchantments()
-        val itemName = hoverName.string.lowercase()
+        val itemName = runCatching { hoverName.string.lowercase() }.getOrDefault("unknown item")
         return if (enchants.isBlank()) itemName else "$enchants $itemName"
     }
 
