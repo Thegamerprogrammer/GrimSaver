@@ -61,12 +61,25 @@ object GrimSaverClient : ClientModInitializer {
             detectionRunning.set(false)
             return
         }
-        emergencyDetector.detect(client, snapshot)?.let { emergency ->
-            triggerThreat(client, emergency)
-            if (!player.isAlive) return
+        val emergency = try {
+            emergencyDetector.detect(client, snapshot)
+        } catch (throwable: Throwable) {
+            warnGrimSaverFailure("emergency-detect", "GrimSaver emergency detector failed; re-enabling future scans", throwable)
+            detectionRunning.set(false)
+            return
+        }
+        emergency?.let { threat ->
+            triggerThreat(client, threat)
+            if (!player.isAlive) {
+                detectionRunning.set(false)
+                return
+            }
         }
 
-        if (!player.isAlive) return
+        if (!player.isAlive) {
+            detectionRunning.set(false)
+            return
+        }
 
         try {
             executor.execute {

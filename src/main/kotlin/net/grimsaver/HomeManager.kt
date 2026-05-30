@@ -30,18 +30,10 @@ class HomeManager(private val logger: LastStandLogger, private val lifecycleList
     fun cooldownReady(threat: Threat): Boolean {
         val now = System.currentTimeMillis()
         pruneExpiredCooldowns(now)
-        val globalDelay = if (threat.kind.isEmergency()) {
-            maxOf(GrimSaverConfig.minCommandIntervalMillis, GrimSaverConfig.criticalEmergencyCooldownMillis)
-        } else {
-            maxOf(GrimSaverConfig.globalCooldownMillis, GrimSaverConfig.minCommandIntervalMillis)
-        }
-        if (now - lastGlobalTrigger < globalDelay) {
-            debugGrimSaver("Cooldown active for global emergency trigger: remainingMs={}", globalDelay - (now - lastGlobalTrigger))
-            return false
-        }
         val lastThreat = threatCooldowns[threat.cooldownKey] ?: 0L
-        val ready = now - lastThreat >= GrimSaverConfig.perThreatCooldownMillis
-        if (!ready) debugGrimSaver("Cooldown active for threat {}: remainingMs={}", threat.cooldownKey, GrimSaverConfig.perThreatCooldownMillis - (now - lastThreat))
+        val perThreatDelay = GrimSaverConfig.perThreatCooldownMillis.coerceAtMost(1_500L)
+        val ready = now - lastThreat >= perThreatDelay
+        if (!ready) debugGrimSaver("Short duplicate-threat debounce active for {}: remainingMs={}", threat.cooldownKey, perThreatDelay - (now - lastThreat))
         return ready
     }
 
@@ -197,6 +189,7 @@ class HomeManager(private val logger: LastStandLogger, private val lifecycleList
         val file = fileForServer(serverKey)
         val state = readState(file, serverKey)
         writeState(file, state.withoutHome(homeName))
+        resetRuntimeState("home-deleted:$homeName")
     }
 
     fun shutdown() {
