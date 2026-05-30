@@ -12,9 +12,13 @@ class EmergencyDetector {
     private var lastDamageAmount = 0.0
     private var lastDamageKind = DamageKind.UNKNOWN
     private var deathFailsafeUsed = false
+    private var lastServerKey: String? = null
+    private var lastDimension: String? = null
+    private var lastPlayerId: Int? = null
 
     fun detect(client: Minecraft, snapshot: WorldSnapshot): Threat? {
         val player = client.player ?: return null
+        observeSnapshotContext(snapshot)
         val now = System.currentTimeMillis()
         val effectiveHealth = snapshot.player.effectiveHealth
         val previousHealth = lastEffectiveHealth
@@ -69,6 +73,24 @@ class EmergencyDetector {
         }
 
         return null
+    }
+
+    private fun observeSnapshotContext(snapshot: WorldSnapshot) {
+        if (lastServerKey != snapshot.serverKey || lastDimension != snapshot.dimension || lastPlayerId != snapshot.playerId) {
+            resetRuntimeState("context-change:${snapshot.serverKey}/${snapshot.dimension}/${snapshot.playerId}")
+            lastServerKey = snapshot.serverKey
+            lastDimension = snapshot.dimension
+            lastPlayerId = snapshot.playerId
+        }
+    }
+
+    fun resetRuntimeState(reason: String) {
+        debugGrimSaver("Resetting EmergencyDetector runtime state ({})", reason)
+        lastEffectiveHealth = null
+        lastDamageMillis = 0L
+        lastDamageAmount = 0.0
+        lastDamageKind = DamageKind.UNKNOWN
+        deathFailsafeUsed = false
     }
 
     private fun deathFailsafe(player: LocalPlayer, snapshot: WorldSnapshot): Threat? {

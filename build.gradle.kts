@@ -18,6 +18,7 @@ repositories {
 }
 
 dependencies {
+    testImplementation(kotlin("test"))
     add("minecraft", libs.minecraft)
     add("api", libs.fabric.loader)
     add("api", libs.fabric.api)
