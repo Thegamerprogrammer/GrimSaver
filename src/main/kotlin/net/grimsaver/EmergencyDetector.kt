@@ -95,14 +95,17 @@ class EmergencyDetector {
 
     private fun deathFailsafe(player: LocalPlayer, snapshot: WorldSnapshot): Threat? {
         if (!GrimSaverConfig.deathFailsafeEnabled) return null
-        val dying = snapshot.player.health <= 0.0 || !runCatching { player.isAlive }.getOrDefault(true)
-        if (!dying) {
+        val alive = runCatching { player.isAlive }.getOrDefault(false)
+        val alreadyDead = snapshot.player.health <= 0.0 || !alive
+        if (!alreadyDead) {
             deathFailsafeUsed = false
             return null
         }
-        if (deathFailsafeUsed) return null
+        if (!deathFailsafeUsed) {
+            debugGrimSaver("Skipping death failsafe /sethome because the player is already dead; command dispatch would be unreliable")
+        }
         deathFailsafeUsed = true
-        return emergencyThreat(ThreatKind.DEATH_FAILSAFE, snapshot, "Death failsafe final coordinate save", 1.0)
+        return null
     }
 
     private fun creeperEmergency(snapshot: WorldSnapshot, criticalHp: Double): Threat? {

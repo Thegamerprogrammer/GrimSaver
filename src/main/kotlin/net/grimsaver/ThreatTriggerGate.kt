@@ -4,11 +4,9 @@ import net.minecraft.client.Minecraft
 
 class ThreatTriggerGate(
     private val clockMillis: () -> Long = System::currentTimeMillis,
-    private val cooldownMillisProvider: () -> Long = { maxOf(GrimSaverConfig.minCommandIntervalMillis, GrimSaverConfig.globalCooldownMillis) },
     private val staleLifecycleMillisProvider: () -> Long = { maxOf(GrimSaverConfig.threatResetTimeoutMillis, GrimSaverConfig.homeDeleteDelayMillis + 5_000L) }
 ) : EmergencyLifecycleListener {
     @Volatile private var state = EmergencyLifecycleState.IDLE
-    @Volatile private var lastTriggerMillis = 0L
     @Volatile private var lastTransitionMillis = 0L
     @Volatile private var lastServerKey: String? = null
     @Volatile private var lastDimension: String? = null
@@ -43,25 +41,22 @@ class ThreatTriggerGate(
             return
         }
         if (!playerAlive && state != EmergencyLifecycleState.IDLE) {
-            debugGrimSaver("GrimSaver lifecycle observed player death while in {}; cleanup will be allowed to finish or stale-reset", state)
+            debugGrimSaver("GrimSaver lifecycle observed player death while in {}; resetting gate so the next live tick can trigger again", state)
+            reset("player-death")
+            return
         }
-        if (state == EmergencyLifecycleState.IDLE) return
-        if (state == EmergencyLifecycleState.HOME_CREATED || state == EmergencyLifecycleState.TELEPORT_EXECUTED || state == EmergencyLifecycleState.CLEANUP) {
-            if (now - lastTransitionMillis >= staleLifecycleMillisProvider()) {
-                reset("stale-lifecycle:${state.name.lowercase()}")
-                return
-            }
-        }
-        if (state == EmergencyLifecycleState.EMERGENCY_TRIGGERED && now - lastTriggerMillis >= cooldownMillisProvider()) {
-            reset("cooldown-expired")
+        if (state != EmergencyLifecycleState.IDLE && now - lastTransitionMillis >= staleLifecycleMillisProvider()) {
+            reset("stale-lifecycle:${state.name.lowercase()}")
         }
     }
 
     @Synchronized
     fun canTrigger(threat: Threat, now: Long = clockMillis()): Boolean {
-        expireCooldown(now)
-        if (state != EmergencyLifecycleState.IDLE) {
-            debugGrimSaver("GrimSaver trigger blocked in lifecycle state {} for threat {}", state, threat.cooldownKey)
+        if (state != EmergencyLifecycleState.IDLE && now - lastTransitionMillis >= staleLifecycleMillisProvider()) {
+            reset("stale-before-trigger:${state.name.lowercase()}")
+        }
+        if (state == EmergencyLifecycleState.THREAT_DETECTED || state == EmergencyLifecycleState.EMERGENCY_TRIGGERED) {
+            debugGrimSaver("GrimSaver trigger blocked only while command dispatch is in-flight for threat {}; state={}", threat.cooldownKey, state)
             return false
         }
         return true
@@ -69,18 +64,17 @@ class ThreatTriggerGate(
 
     @Synchronized
     fun markThreatDetected(threat: Threat) {
-        if (state != EmergencyLifecycleState.IDLE) return
         activeThreatKey = threat.cooldownKey
+        activeHomeName = null
         transition(EmergencyLifecycleState.THREAT_DETECTED, "threat=${threat.cooldownKey}")
     }
 
     @Synchronized
     fun markTriggered(threat: Threat) {
         activeThreatKey = threat.cooldownKey
-        lastTriggerMillis = clockMillis()
         transition(
             EmergencyLifecycleState.EMERGENCY_TRIGGERED,
-            "threat=${threat.kind.id} damage=${threat.damage} predicted=${threat.predictedDamage} remaining=${threat.health - threat.predictedDamage} confidence=${threat.confidence} source=${threat.source} cooldownMs=${cooldownMillisProvider()}"
+            "threat=${threat.kind.id} damage=${threat.damage} predicted=${threat.predictedDamage} remaining=${threat.health - threat.predictedDamage} confidence=${threat.confidence} source=${threat.source}"
         )
     }
 
@@ -88,6 +82,7 @@ class ThreatTriggerGate(
         activeHomeName = homeName
         activeThreatKey = threat.cooldownKey
         transition(EmergencyLifecycleState.HOME_CREATED, "home=$homeName threat=${threat.cooldownKey}")
+        reset("home-created-ready-for-next-threat:$homeName")
     }
 
     override fun onTeleportExecuted(homeName: String) = synchronized(this) {
@@ -101,13 +96,22 @@ class ThreatTriggerGate(
     }
 
     override fun onCleanupCompleted(homeName: String) = synchronized(this) {
-        if (activeHomeName == null || activeHomeName == homeName) reset("cleanup-completed:$homeName") else debugGrimSaver("Ignoring cleanup completion for non-active home {} while active home is {}", homeName, activeHomeName)
+        if (cleanupOwnsCurrentState(homeName)) {
+            reset("cleanup-completed:$homeName")
+        } else {
+            debugGrimSaver("Ignoring cleanup completion for home {} because current lifecycle state is {} and activeHome={}", homeName, state, activeHomeName)
+        }
     }
 
     override fun onCleanupFailed(homeName: String, throwable: Throwable) = synchronized(this) {
-        warnGrimSaverFailure("cleanup-failed-$homeName", "GrimSaver cleanup failed for home $homeName; resetting lifecycle so future emergency cycles can continue", throwable)
-        reset("cleanup-failed:$homeName")
+        warnGrimSaverFailure("cleanup-failed-$homeName", "GrimSaver cleanup failed for home $homeName; future emergency cycles remain enabled", throwable)
+        if (cleanupOwnsCurrentState(homeName)) {
+            reset("cleanup-failed:$homeName")
+        }
     }
+
+    private fun cleanupOwnsCurrentState(homeName: String): Boolean =
+        (state == EmergencyLifecycleState.TELEPORT_EXECUTED || state == EmergencyLifecycleState.CLEANUP) && (activeHomeName == null || activeHomeName == homeName)
 
     @Synchronized
     fun forceReset(reason: String) = reset(reason)
@@ -117,12 +121,6 @@ class ThreatTriggerGate(
 
     @Synchronized
     fun activeHome(): String? = activeHomeName
-
-    private fun expireCooldown(now: Long) {
-        if (state == EmergencyLifecycleState.EMERGENCY_TRIGGERED && now - lastTriggerMillis >= cooldownMillisProvider()) {
-            reset("cooldown-expired")
-        }
-    }
 
     private fun transition(next: EmergencyLifecycleState, detail: String) {
         val previous = state

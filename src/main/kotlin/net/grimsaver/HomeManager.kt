@@ -48,6 +48,10 @@ class HomeManager(private val logger: LastStandLogger, private val lifecycleList
     @Synchronized
     fun tryTrigger(client: Minecraft, threat: Threat): SavedHome? {
         val player = client.player ?: return null
+        if (!runCatching { player.isAlive }.getOrDefault(false)) {
+            debugGrimSaver("Skipping GrimSaver /sethome for threat {} because the player is not alive; no fake home record will be written", threat.cooldownKey)
+            return null
+        }
         if (!cooldownReady(threat)) return null
         debugGrimSaver("Starting GrimSaver home creation for threat {} damage={} health={} confidence={}", threat.cooldownKey, threat.damage, threat.health, threat.confidence)
         if (!directory.exists()) directory.createDirectories()
@@ -66,13 +70,13 @@ class HomeManager(private val logger: LastStandLogger, private val lifecycleList
             threatKind = threat.kind,
             source = threat.source
         )
+        player.connection.sendCommand("sethome $homeName")
         val updated = state.withHome(savedHome, next)
         writeState(file, updated)
         logger.log(savedHome)
 
         lastGlobalTrigger = System.currentTimeMillis()
         threatCooldowns[threat.cooldownKey] = lastGlobalTrigger
-        player.connection.sendCommand("sethome $homeName")
         lifecycleListener?.onHomeCreated(homeName, threat)
         debugGrimSaver(
             "Lethal threat triggered /sethome {}: damage={} effectiveHp={} confidence={} source={}",
