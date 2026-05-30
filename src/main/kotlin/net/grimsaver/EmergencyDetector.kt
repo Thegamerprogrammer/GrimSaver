@@ -40,6 +40,7 @@ class EmergencyDetector {
         val burst = burstEmergency(snapshot, previousHealth, healthDrop, recentDamage)
         val hostile = nearestHostileDanger(snapshot)
         val passiveContact = nearestPassiveContact(snapshot)
+        predictedIncomingThreat(snapshot)?.let { return it }
 
         burst?.let { return it }
         creeper?.let { return it }
@@ -61,8 +62,8 @@ class EmergencyDetector {
                 hostile != null && (hostile.targetId == snapshot.playerId || hostile.distanceToPlayer(snapshot) <= hostile.attackRange + 1.5) -> {
                     return emergencyThreat(ThreatKind.CRITICAL_HEALTH, snapshot, "Critical health near ${hostile.typeName}", 0.96)
                 }
-                snapshot.projectiles.any { it.position.distanceTo(snapshot.player.position) <= 5.0 } -> {
-                    return emergencyThreat(ThreatKind.CRITICAL_HEALTH, snapshot, "Critical health with nearby projectile", 0.95)
+                snapshot.projectiles.any { it.predictedImpact(snapshot) != null } -> {
+                    return emergencyThreat(ThreatKind.CRITICAL_HEALTH, snapshot, "Critical health with incoming projectile", 0.95)
                 }
             }
         }
@@ -121,30 +122,70 @@ class EmergencyDetector {
 
     private fun LivingSnapshot.canBeDangerousPassive(): Boolean {
         val type = typeName.lowercase()
-        return listOf("wolf", "bee", "goat", "golem", "llama", "polar_bear", "panda", "dolphin").any(type::contains)
+        return listOf("wolf", "bee", "goat", "golem", "llama", "polar_bear", "panda").any(type::contains)
     }
 
     private fun environmentDanger(player: LocalPlayer, snapshot: WorldSnapshot): String? = when {
         runCatching { player.isInLava }.getOrDefault(false) -> "lava"
         runCatching { player.isOnFire }.getOrDefault(false) -> "fire"
         runCatching { player.airSupply <= 0 }.getOrDefault(false) -> "drowning"
-        runCatching { player.hasEffect(MobEffects.POISON) }.getOrDefault(false) -> "poison"
+        runCatching { player.hasEffect(MobEffects.POISON) }.getOrDefault(false) && snapshot.player.effectiveHealth <= GrimSaverConfig.ultraCriticalHearts * 2.0 -> "poison-low-health"
         runCatching { player.hasEffect(MobEffects.WITHER) }.getOrDefault(false) -> "wither"
         snapshot.player.velocity.y < -0.45 && snapshot.player.fallDistance > snapshot.player.safeFallDistance + 2.0 -> "falling"
         else -> null
     }
 
-    private fun inferDamageKind(player: LocalPlayer, snapshot: WorldSnapshot): DamageKind = when {
-        environmentDanger(player, snapshot) != null -> DamageKind.ENVIRONMENT
-        snapshot.projectiles.any { it.position.distanceTo(snapshot.player.position) <= 6.0 } -> DamageKind.PROJECTILE
-        snapshot.livingEntities.any { it.isCreeper && it.creeperSwelling && it.distanceToPlayer(snapshot) <= 6.0 } -> DamageKind.EXPLOSION
-        snapshot.livingEntities.any { it.targetId == snapshot.playerId || it.distanceToPlayer(snapshot) <= it.attackRange + 0.75 } -> DamageKind.MELEE
-        else -> DamageKind.UNKNOWN
+    private fun inferDamageKind(player: LocalPlayer, snapshot: WorldSnapshot): DamageKind {
+        val candidates = listOf(
+            DamageKind.ENVIRONMENT to if (environmentDanger(player, snapshot) != null) 0.75 else 0.0,
+            DamageKind.PROJECTILE to (snapshot.projectiles.mapNotNull { it.predictedImpact(snapshot) }.minOfOrNull { 1.0 - (it.ticks / GrimSaverConfig.projectileLookaheadTicks.toDouble()).coerceIn(0.0, 1.0) } ?: 0.0),
+            DamageKind.EXPLOSION to (snapshot.livingEntities.filter { it.isCreeper && it.creeperSwelling && it.distanceToPlayer(snapshot) <= 6.0 }.maxOfOrNull { 1.0 - (it.distanceToPlayer(snapshot) / 6.0).coerceIn(0.0, 1.0) } ?: 0.0),
+            DamageKind.MELEE to (snapshot.livingEntities.filter { it.targetId == snapshot.playerId || it.distanceToPlayer(snapshot) <= it.attackRange + 0.75 }.maxOfOrNull { 1.0 - (it.distanceToPlayer(snapshot) / (it.attackRange + 1.0)).coerceIn(0.0, 1.0) } ?: 0.0)
+        )
+        return candidates.maxByOrNull { it.second }?.takeIf { it.second > 0.0 }?.first ?: DamageKind.UNKNOWN
     }
 
     private fun LocalPlayer.recentlyHurt(): Boolean = runCatching { hurtTime > 0 || invulnerableTime > 0 }.getOrDefault(false)
 
     private fun recentDamageWindowMillis(): Long = GrimSaverConfig.recentDamageWindowTicks * 50L
+
+    private fun predictedIncomingThreat(snapshot: WorldSnapshot): Threat? {
+        val incoming = snapshot.projectiles.mapNotNull { projectile ->
+            val impact = projectile.predictedImpact(snapshot) ?: return@mapNotNull null
+            val prediction = DamagePredictor.projectile(projectile, snapshot.player)
+            IncomingDamage(impact.ticks, prediction.damage, prediction.source, prediction.confidence * (1.0 - (impact.ticks / GrimSaverConfig.projectileLookaheadTicks.toDouble()).coerceIn(0.0, 0.5)), projectile.id)
+        }.filter { it.ticksUntilImpact <= 40 }
+        if (incoming.isEmpty()) return null
+        val combinedDamage = incoming.sumOf { it.damage }
+        val combinedConfidence = incoming.maxOf { it.confidence }
+        val netHealth = snapshot.player.effectiveHealth + snapshot.player.regenerationPerSecond * 2.0
+        if (combinedDamage < netHealth + GrimSaverConfig.safetyMargin || combinedConfidence < GrimSaverConfig.lethalConfidenceThreshold * 0.75) return null
+        val first = incoming.minBy { it.ticksUntilImpact }
+        return Threat(
+            kind = ThreatKind.LETHAL_PROJECTILE,
+            damage = combinedDamage,
+            health = snapshot.player.effectiveHealth,
+            source = first.source,
+            reason = "Predicted incoming projectile damage ${"%.1f".format(combinedDamage)} in ${first.ticksUntilImpact} ticks confidence=${(combinedConfidence * 100.0).toInt()}%",
+            confidence = combinedConfidence,
+            ticksUntilImpact = first.ticksUntilImpact,
+            position = snapshot.player.position,
+            predictedDamage = combinedDamage,
+            lethalProbability = (combinedDamage / netHealth.coerceAtLeast(1.0) * combinedConfidence).coerceIn(0.0, 1.0),
+            sourceEntityId = first.sourceEntityId
+        )
+    }
+
+    private fun ProjectileSnapshot.predictedImpact(snapshot: WorldSnapshot): TrajectoryHelper.Impact? =
+        TrajectoryHelper.firstPlayerIntersection(this, snapshot.player.boundingBox, GrimSaverConfig.projectileLookaheadTicks)
+
+    private data class IncomingDamage(
+        val ticksUntilImpact: Int,
+        val damage: Double,
+        val source: String,
+        val confidence: Double,
+        val sourceEntityId: Int?
+    )
 
     private fun emergencyThreat(
         kind: ThreatKind,
@@ -153,15 +194,27 @@ class EmergencyDetector {
         confidence: Double,
         damage: Double = snapshot.player.effectiveHealth + GrimSaverConfig.safetyMargin + 1.0,
         source: String = reason.substringBefore(':')
-    ): Threat = Threat(
-        kind = kind,
-        damage = max(damage, snapshot.player.effectiveHealth + GrimSaverConfig.safetyMargin + 1.0),
-        health = snapshot.player.effectiveHealth,
-        source = source,
-        reason = "$reason confidence=${(confidence * 100.0).toInt()}%",
-        confidence = confidence,
-        position = snapshot.player.position
-    )
+    ): Threat {
+        val weightedConfidence = weightedEmergencyConfidence(kind, snapshot, confidence, source, reason)
+        return Threat(
+            kind = kind,
+            damage = max(damage, snapshot.player.effectiveHealth + GrimSaverConfig.safetyMargin + 1.0),
+            health = snapshot.player.effectiveHealth,
+            source = source,
+            reason = "$reason confidence=${(weightedConfidence * 100.0).toInt()}%",
+            confidence = weightedConfidence,
+            position = snapshot.player.position
+        )
+    }
+
+    private fun weightedEmergencyConfidence(kind: ThreatKind, snapshot: WorldSnapshot, baseConfidence: Double, source: String, reason: String): Double {
+        val maxHealth = snapshot.player.maxHealth.coerceAtLeast(1.0)
+        val heartPressure = (1.0 - snapshot.player.effectiveHealth / maxHealth).coerceIn(0.0, 1.0)
+        val playerHeartsBias = 0.60 + heartPressure * 0.40
+        val creeperExplosionBias = if (kind == ThreatKind.CREEPER_EMERGENCY || "creeper" in source.lowercase() || "creeper" in reason.lowercase()) 0.10 else 0.0
+        val burstBias = if (kind == ThreatKind.BURST_DAMAGE || kind == ThreatKind.CRITICAL_DAMAGE) 0.05 else 0.0
+        return (baseConfidence * playerHeartsBias + creeperExplosionBias + burstBias).coerceIn(0.0, 1.0)
+    }
 
     private fun LivingSnapshot.distanceToPlayer(snapshot: WorldSnapshot): Double = position.distanceTo(snapshot.player.position)
 
@@ -170,6 +223,6 @@ class EmergencyDetector {
         PROJECTILE("projectile", true),
         EXPLOSION("explosion", true),
         ENVIRONMENT("environmental", true),
-        UNKNOWN("unknown", true)
+        UNKNOWN("unknown", false)
     }
 }

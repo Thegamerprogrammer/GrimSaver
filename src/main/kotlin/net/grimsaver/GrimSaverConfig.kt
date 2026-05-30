@@ -44,6 +44,34 @@ object GrimSaverConfig {
     var ultraCriticalAnyDamage = true
     var loggingVerbosity = LoggingVerbosity.WARN
 
+    var riskEngineEnabled = true
+    var riskDebug = false
+    var burstAbsoluteThreshold = 6.0
+    var burstVelocityThreshold = 12.0
+    var lethalBurstVelocityThreshold = 30.0
+    var burstMediumThreshold = 6.0
+    var burstCriticalThreshold = 10.0
+    var burstPercentWindowTicks = 20
+    var healthVelocityWeight = 0.40
+    var burstWeight = 0.25
+    var damagePredictionWeight = 0.15
+    var targetingWeight = 0.10
+    var enchantmentWeight = 0.05
+    var trajectoryWeight = 0.05
+    var homeMaxSlots = 1
+    var homeUseMaxSlot = false
+    var homeAutoDelete = true
+    var homeDeleteDelayMillis = 6_000L
+    var maceDownwardVelocityThreshold = -0.55
+    var maceMinimumHeightAdvantage = 1.5
+    var maceFallDamageScale = 1.5
+    var maceVelocityDamageScale = 0.35
+    var moddedProjectileGravity = 0.03
+    var moddedProjectileHitboxRadius = 0.25
+    var moddedProjectileDrag = 0.99
+    var healthForecastTicks = 80
+    var threatCorrelationWindowTicks = 20
+
     @Deprecated("Use pvpThreats and mobThreats for more precise control.")
     var meleeThreats: Boolean
         get() = pvpThreats || mobThreats
@@ -99,6 +127,33 @@ object GrimSaverConfig {
             deathFailsafeEnabled = json.bool("deathFailsafeEnabled", deathFailsafeEnabled)
             ultraCriticalAnyDamage = json.bool("ultraCriticalAnyDamage", ultraCriticalAnyDamage)
             loggingVerbosity = LoggingVerbosity.fromConfig(json.string("loggingVerbosity", loggingVerbosity.name))
+            riskEngineEnabled = json.bool("riskEngineEnabled", riskEngineEnabled)
+            riskDebug = json.bool("riskDebug", riskDebug)
+            burstAbsoluteThreshold = json.double("burstAbsoluteThreshold", burstAbsoluteThreshold).coerceIn(0.5, 40.0)
+            burstVelocityThreshold = json.double("burstVelocityThreshold", burstVelocityThreshold).coerceIn(0.5, 120.0)
+            lethalBurstVelocityThreshold = json.double("lethalBurstVelocityThreshold", lethalBurstVelocityThreshold).coerceIn(burstVelocityThreshold, 240.0)
+            burstMediumThreshold = json.double("burstMediumThreshold", burstMediumThreshold).coerceIn(0.5, 40.0)
+            burstCriticalThreshold = json.double("burstCriticalThreshold", burstCriticalThreshold).coerceIn(burstMediumThreshold, 80.0)
+            burstPercentWindowTicks = json.int("burstPercentWindowTicks", burstPercentWindowTicks).coerceIn(1, 200)
+            healthVelocityWeight = json.double("healthVelocityWeight", healthVelocityWeight).coerceIn(0.0, 1.0)
+            burstWeight = json.double("burstWeight", burstWeight).coerceIn(0.0, 1.0)
+            damagePredictionWeight = json.double("damagePredictionWeight", damagePredictionWeight).coerceIn(0.0, 1.0)
+            targetingWeight = json.double("targetingWeight", targetingWeight).coerceIn(0.0, 1.0)
+            enchantmentWeight = json.double("enchantmentWeight", enchantmentWeight).coerceIn(0.0, 1.0)
+            trajectoryWeight = json.double("trajectoryWeight", trajectoryWeight).coerceIn(0.0, 1.0)
+            homeMaxSlots = json.int("homeMaxSlots", homeMaxSlots).coerceIn(1, 4)
+            homeUseMaxSlot = json.bool("homeUseMaxSlot", homeUseMaxSlot)
+            homeAutoDelete = json.bool("homeAutoDelete", homeAutoDelete)
+            homeDeleteDelayMillis = json.long("homeDeleteDelayMillis", homeDeleteDelayMillis).coerceIn(0L, 60_000L)
+            maceDownwardVelocityThreshold = json.double("maceDownwardVelocityThreshold", maceDownwardVelocityThreshold).coerceIn(-5.0, -0.05)
+            maceMinimumHeightAdvantage = json.double("maceMinimumHeightAdvantage", maceMinimumHeightAdvantage).coerceIn(0.0, 16.0)
+            maceFallDamageScale = json.double("maceFallDamageScale", maceFallDamageScale).coerceIn(0.0, 10.0)
+            maceVelocityDamageScale = json.double("maceVelocityDamageScale", maceVelocityDamageScale).coerceIn(0.0, 10.0)
+            moddedProjectileGravity = json.double("moddedProjectileGravity", moddedProjectileGravity).coerceIn(0.0, 0.25)
+            moddedProjectileHitboxRadius = json.double("moddedProjectileHitboxRadius", moddedProjectileHitboxRadius).coerceIn(0.0, 2.0)
+            moddedProjectileDrag = json.double("moddedProjectileDrag", moddedProjectileDrag).coerceIn(0.5, 1.1)
+            healthForecastTicks = json.int("healthForecastTicks", healthForecastTicks).coerceIn(20, 200)
+            threatCorrelationWindowTicks = json.int("threatCorrelationWindowTicks", threatCorrelationWindowTicks).coerceIn(1, 80)
             save()
         }.onFailure { throwable ->
             warnGrimSaverFailure("config-load", "Unable to load GrimSaver config; using in-memory defaults", throwable)
@@ -139,7 +194,34 @@ object GrimSaverConfig {
             burstDamagePercentThreshold = burstDamagePercentThreshold,
             deathFailsafeEnabled = deathFailsafeEnabled,
             ultraCriticalAnyDamage = ultraCriticalAnyDamage,
-            loggingVerbosity = loggingVerbosity.name.lowercase()
+            loggingVerbosity = loggingVerbosity.name.lowercase(),
+            riskEngineEnabled = riskEngineEnabled,
+            riskDebug = riskDebug,
+            burstAbsoluteThreshold = burstAbsoluteThreshold,
+            burstVelocityThreshold = burstVelocityThreshold,
+            lethalBurstVelocityThreshold = lethalBurstVelocityThreshold,
+            burstMediumThreshold = burstMediumThreshold,
+            burstCriticalThreshold = burstCriticalThreshold,
+            burstPercentWindowTicks = burstPercentWindowTicks,
+            healthVelocityWeight = healthVelocityWeight,
+            burstWeight = burstWeight,
+            damagePredictionWeight = damagePredictionWeight,
+            targetingWeight = targetingWeight,
+            enchantmentWeight = enchantmentWeight,
+            trajectoryWeight = trajectoryWeight,
+            homeMaxSlots = homeMaxSlots,
+            homeUseMaxSlot = homeUseMaxSlot,
+            homeAutoDelete = homeAutoDelete,
+            homeDeleteDelayMillis = homeDeleteDelayMillis,
+            maceDownwardVelocityThreshold = maceDownwardVelocityThreshold,
+            maceMinimumHeightAdvantage = maceMinimumHeightAdvantage,
+            maceFallDamageScale = maceFallDamageScale,
+            maceVelocityDamageScale = maceVelocityDamageScale,
+            moddedProjectileGravity = moddedProjectileGravity,
+            moddedProjectileHitboxRadius = moddedProjectileHitboxRadius,
+            moddedProjectileDrag = moddedProjectileDrag,
+            healthForecastTicks = healthForecastTicks,
+            threatCorrelationWindowTicks = threatCorrelationWindowTicks,
         )
         Files.newBufferedWriter(path).use { gson.toJson(dto, it) }
     }
@@ -175,6 +257,22 @@ object GrimSaverConfig {
         burstDamagePercentThreshold = props.double("burstDamagePercentThreshold", burstDamagePercentThreshold)
         deathFailsafeEnabled = props.bool("deathFailsafeEnabled", deathFailsafeEnabled)
         ultraCriticalAnyDamage = props.bool("ultraCriticalAnyDamage", ultraCriticalAnyDamage)
+
+        riskEngineEnabled = props.bool("riskEngineEnabled", riskEngineEnabled)
+        riskDebug = props.bool("riskDebug", riskDebug)
+        burstAbsoluteThreshold = props.double("burstAbsoluteThreshold", burstAbsoluteThreshold)
+        burstVelocityThreshold = props.double("burstVelocityThreshold", burstVelocityThreshold)
+        healthVelocityWeight = props.double("healthVelocityWeight", healthVelocityWeight)
+        burstWeight = props.double("burstWeight", burstWeight)
+        damagePredictionWeight = props.double("damagePredictionWeight", damagePredictionWeight)
+        targetingWeight = props.double("targetingWeight", targetingWeight)
+        enchantmentWeight = props.double("enchantmentWeight", enchantmentWeight)
+        trajectoryWeight = props.double("trajectoryWeight", trajectoryWeight)
+        homeMaxSlots = props.int("homeMaxSlots", homeMaxSlots).coerceIn(1, 4)
+        homeAutoDelete = props.bool("homeAutoDelete", homeAutoDelete)
+        homeDeleteDelayMillis = props.long("homeDeleteDelayMillis", homeDeleteDelayMillis)
+        healthForecastTicks = props.int("healthForecastTicks", healthForecastTicks).coerceIn(20, 200)
+        threatCorrelationWindowTicks = props.int("threatCorrelationWindowTicks", threatCorrelationWindowTicks).coerceIn(1, 80)
     }
 
     private fun JsonObject.bool(key: String, default: Boolean): Boolean = get(key)?.takeIf { it.isJsonPrimitive }?.asString?.toBooleanStrictOrNull() ?: default
@@ -234,6 +332,33 @@ object GrimSaverConfig {
         val burstDamagePercentThreshold: Double,
         val deathFailsafeEnabled: Boolean,
         val ultraCriticalAnyDamage: Boolean,
-        val loggingVerbosity: String
+        val loggingVerbosity: String,
+        val riskEngineEnabled: Boolean,
+        val riskDebug: Boolean,
+        val burstAbsoluteThreshold: Double,
+        val burstVelocityThreshold: Double,
+        val lethalBurstVelocityThreshold: Double,
+        val burstMediumThreshold: Double,
+        val burstCriticalThreshold: Double,
+        val burstPercentWindowTicks: Int,
+        val healthVelocityWeight: Double,
+        val burstWeight: Double,
+        val damagePredictionWeight: Double,
+        val targetingWeight: Double,
+        val enchantmentWeight: Double,
+        val trajectoryWeight: Double,
+        val homeMaxSlots: Int,
+        val homeUseMaxSlot: Boolean,
+        val homeAutoDelete: Boolean,
+        val homeDeleteDelayMillis: Long,
+        val maceDownwardVelocityThreshold: Double,
+        val maceMinimumHeightAdvantage: Double,
+        val maceFallDamageScale: Double,
+        val maceVelocityDamageScale: Double,
+        val moddedProjectileGravity: Double,
+        val moddedProjectileHitboxRadius: Double,
+        val moddedProjectileDrag: Double,
+        val healthForecastTicks: Int,
+        val threatCorrelationWindowTicks: Int,
     )
 }

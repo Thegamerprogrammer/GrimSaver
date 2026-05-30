@@ -32,9 +32,12 @@ data class Threat(
     val reason: String,
     val confidence: Double,
     val ticksUntilImpact: Int = 0,
-    val position: Vec3
+    val position: Vec3,
+    val predictedDamage: Double = damage,
+    val lethalProbability: Double = confidence,
+    val sourceEntityId: Int? = null
 ) {
-    val cooldownKey: String = "${kind.id}:$source"
+    val cooldownKey: String = "${kind.id}:${sourceEntityId ?: source}"
 }
 
 data class SavedHome(
@@ -50,8 +53,19 @@ data class SavedHome(
 data class DamagePrediction(
     val damage: Double,
     val reason: String,
-    val source: String
+    val source: String,
+    val confidence: Double = 0.75
 )
+
+data class ActiveEffectSnapshot(
+    val id: String,
+    val amplifier: Int,
+    val durationTicks: Int,
+    val ambient: Boolean = false,
+    val visible: Boolean = true
+) {
+    fun matches(name: String): Boolean = id.contains(name, ignoreCase = true)
+}
 
 data class PlayerSnapshot(
     val position: Vec3,
@@ -66,7 +80,10 @@ data class PlayerSnapshot(
     val fallDistance: Float,
     val safeFallDistance: Double,
     val fallDamageMultiplier: Double,
-    val onGround: Boolean
+    val onGround: Boolean,
+    val activeEffects: List<ActiveEffectSnapshot> = emptyList(),
+    val fireImmune: Boolean = false,
+    val regenerationPerSecond: Double = 0.0
 ) {
     val effectiveHealth: Double = health + absorption
 }
@@ -82,7 +99,15 @@ data class ProjectileSnapshot(
     val ownerName: String?,
     val critical: Boolean,
     val onFire: Boolean,
-    val inGround: Boolean
+    val inGround: Boolean,
+    val ownerId: Int? = null,
+    val ageTicks: Int = 0,
+    val pickupStatus: Int = -1,
+    val pierceLevel: Int = 0,
+    val potionEffects: List<ActiveEffectSnapshot> = emptyList(),
+    val gravity: Double = 0.03,
+    val baseDamage: Double? = null,
+    val dataConfidence: Double = 0.6
 )
 
 data class LivingSnapshot(
@@ -106,7 +131,12 @@ data class LivingSnapshot(
     val isCreeper: Boolean,
     val creeperSwelling: Boolean,
     val targetId: Int?,
-    val attackRange: Double
+    val attackRange: Double,
+    val attackCooldown: Double = 1.0,
+    val isSprinting: Boolean = false,
+    val fallDistance: Float = 0.0f,
+    val isOnGround: Boolean = true,
+    val activeEffects: List<ActiveEffectSnapshot> = emptyList()
 )
 
 data class WorldSnapshot(
