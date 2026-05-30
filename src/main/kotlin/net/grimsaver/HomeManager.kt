@@ -17,7 +17,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
 
-class HomeManager(private val logger: LastStandLogger) {
+class HomeManager(private val logger: LastStandLogger, private val lifecycleListener: EmergencyLifecycleListener? = null) {
     private val directory: Path = FabricLoader.getInstance().configDir.resolve("grimsaver").resolve("homes")
     private val legacyDirectory: Path = FabricLoader.getInstance().configDir.resolve("LastStand").resolve("DangerHomes")
     private val gson = GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create()
@@ -29,20 +29,23 @@ class HomeManager(private val logger: LastStandLogger) {
 
     fun cooldownReady(threat: Threat): Boolean {
         val now = System.currentTimeMillis()
-        val globalDelay = if (threat.kind.isEmergency()) {
-            maxOf(GrimSaverConfig.minCommandIntervalMillis, GrimSaverConfig.criticalEmergencyCooldownMillis)
-        } else {
-            maxOf(GrimSaverConfig.globalCooldownMillis, GrimSaverConfig.minCommandIntervalMillis)
-        }
-        if (now - lastGlobalTrigger < globalDelay) return false
+        pruneExpiredCooldowns(now)
         val lastThreat = threatCooldowns[threat.cooldownKey] ?: 0L
-        return now - lastThreat >= GrimSaverConfig.perThreatCooldownMillis
+        val perThreatDelay = GrimSaverConfig.perThreatCooldownMillis.coerceAtMost(1_500L)
+        val ready = now - lastThreat >= perThreatDelay
+        if (!ready) debugGrimSaver("Short duplicate-threat debounce active for {}: remainingMs={}", threat.cooldownKey, perThreatDelay - (now - lastThreat))
+        return ready
     }
 
     @Synchronized
     fun tryTrigger(client: Minecraft, threat: Threat): SavedHome? {
         val player = client.player ?: return null
+        if (!runCatching { player.isAlive }.getOrDefault(false)) {
+            debugGrimSaver("Skipping GrimSaver /sethome for threat {} because the player is not alive; no fake home record will be written", threat.cooldownKey)
+            return null
+        }
         if (!cooldownReady(threat)) return null
+        debugGrimSaver("Starting GrimSaver home creation for threat {} damage={} health={} confidence={}", threat.cooldownKey, threat.damage, threat.health, threat.confidence)
         if (!directory.exists()) directory.createDirectories()
 
         val serverKey = client.currentServer?.ip ?: "singleplayer"
@@ -59,13 +62,14 @@ class HomeManager(private val logger: LastStandLogger) {
             threatKind = threat.kind,
             source = threat.source
         )
+        player.connection.sendCommand("sethome $homeName")
         val updated = state.withHome(savedHome, next)
         writeState(file, updated)
         logger.log(savedHome)
 
         lastGlobalTrigger = System.currentTimeMillis()
         threatCooldowns[threat.cooldownKey] = lastGlobalTrigger
-        player.connection.sendCommand("sethome $homeName")
+        lifecycleListener?.onHomeCreated(homeName, threat)
         debugGrimSaver(
             "Lethal threat triggered /sethome {}: damage={} effectiveHp={} confidence={} source={}",
             homeName,
@@ -140,6 +144,7 @@ class HomeManager(private val logger: LastStandLogger) {
         val parts = trimmed.split(Regex("\\s+"))
         if (parts.size < 2 || !parts[0].equals("home", ignoreCase = true)) return
         val home = normalizeHomeName(parts[1]) ?: return
+        lifecycleListener?.onTeleportExecuted(home)
         scheduleDelete(client, home)
     }
 
@@ -150,17 +155,30 @@ class HomeManager(private val logger: LastStandLogger) {
         ?.toString()
 
     private fun scheduleDelete(client: Minecraft, homeName: String) {
-        if (!GrimSaverConfig.homeAutoDelete) return
+        if (!GrimSaverConfig.homeAutoDelete) {
+            debugGrimSaver("Home auto-delete disabled; cleanup considered complete for {}", homeName)
+            lifecycleListener?.onCleanupCompleted(homeName)
+            return
+        }
         val delay = GrimSaverConfig.homeDeleteDelayMillis.coerceAtLeast(0L)
         deleteExecutor.schedule({
-            client.execute {
-                runCatching {
-                    client.player?.connection?.sendCommand("delhome $homeName")
-                    markHomeDeleted(client, homeName)
-                    debugGrimSaver("Deleted GrimSaver home {} after lifecycle delay {}ms", homeName, delay)
-                }.onFailure { throwable ->
-                    warnGrimSaverFailure("home-auto-delete", "Unable to auto-delete GrimSaver home $homeName", throwable)
+            runCatching {
+                client.execute {
+                    lifecycleListener?.onCleanupStarted(homeName)
+                    runCatching {
+                        val player = client.player ?: error("Cannot delete GrimSaver home $homeName because the player is not available")
+                        player.connection.sendCommand("delhome $homeName")
+                        markHomeDeleted(client, homeName)
+                        debugGrimSaver("Deleted GrimSaver home {} after lifecycle delay {}ms", homeName, delay)
+                        lifecycleListener?.onCleanupCompleted(homeName)
+                    }.onFailure { throwable ->
+                        warnGrimSaverFailure("home-auto-delete", "Unable to auto-delete GrimSaver home $homeName", throwable)
+                        lifecycleListener?.onCleanupFailed(homeName, throwable)
+                    }
                 }
+            }.onFailure { throwable ->
+                warnGrimSaverFailure("home-auto-delete-submit", "Unable to submit GrimSaver auto-delete for home $homeName", throwable)
+                lifecycleListener?.onCleanupFailed(homeName, throwable)
             }
         }, delay, TimeUnit.MILLISECONDS)
     }
@@ -171,10 +189,27 @@ class HomeManager(private val logger: LastStandLogger) {
         val file = fileForServer(serverKey)
         val state = readState(file, serverKey)
         writeState(file, state.withoutHome(homeName))
+        resetRuntimeState("home-deleted:$homeName")
     }
 
     fun shutdown() {
         deleteExecutor.shutdownNow()
+    }
+
+    fun resetRuntimeState(reason: String) {
+        debugGrimSaver("Resetting GrimSaver HomeManager runtime state ({}) cooldowns={}", reason, threatCooldowns.size)
+        threatCooldowns.clear()
+        lastGlobalTrigger = 0L
+    }
+
+    fun cooldownCount(): Int = threatCooldowns.size
+
+    private fun pruneExpiredCooldowns(now: Long = System.currentTimeMillis()) {
+        val ttl = maxOf(GrimSaverConfig.perThreatCooldownMillis, GrimSaverConfig.threatResetTimeoutMillis)
+        val before = threatCooldowns.size
+        threatCooldowns.entries.removeIf { now - it.value >= ttl }
+        val removed = before - threatCooldowns.size
+        if (removed > 0) debugGrimSaver("Expired {} GrimSaver threat cooldown records; remaining={}", removed, threatCooldowns.size)
     }
 
     private fun writeState(file: Path, state: HomeState) {
