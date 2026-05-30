@@ -69,6 +69,8 @@ object GrimSaverConfig {
     var moddedProjectileGravity = 0.03
     var moddedProjectileHitboxRadius = 0.25
     var moddedProjectileDrag = 0.99
+    var healthForecastTicks = 80
+    var threatCorrelationWindowTicks = 20
 
     @Deprecated("Use pvpThreats and mobThreats for more precise control.")
     var meleeThreats: Boolean
@@ -150,6 +152,8 @@ object GrimSaverConfig {
             moddedProjectileGravity = json.double("moddedProjectileGravity", moddedProjectileGravity).coerceIn(0.0, 0.25)
             moddedProjectileHitboxRadius = json.double("moddedProjectileHitboxRadius", moddedProjectileHitboxRadius).coerceIn(0.0, 2.0)
             moddedProjectileDrag = json.double("moddedProjectileDrag", moddedProjectileDrag).coerceIn(0.5, 1.1)
+            healthForecastTicks = json.int("healthForecastTicks", healthForecastTicks).coerceIn(20, 200)
+            threatCorrelationWindowTicks = json.int("threatCorrelationWindowTicks", threatCorrelationWindowTicks).coerceIn(1, 80)
             save()
         }.onFailure { throwable ->
             warnGrimSaverFailure("config-load", "Unable to load GrimSaver config; using in-memory defaults", throwable)
@@ -216,6 +220,8 @@ object GrimSaverConfig {
             moddedProjectileGravity = moddedProjectileGravity,
             moddedProjectileHitboxRadius = moddedProjectileHitboxRadius,
             moddedProjectileDrag = moddedProjectileDrag,
+            healthForecastTicks = healthForecastTicks,
+            threatCorrelationWindowTicks = threatCorrelationWindowTicks,
         )
         Files.newBufferedWriter(path).use { gson.toJson(dto, it) }
     }
@@ -265,6 +271,8 @@ object GrimSaverConfig {
         homeMaxSlots = props.int("homeMaxSlots", homeMaxSlots).coerceIn(1, 4)
         homeAutoDelete = props.bool("homeAutoDelete", homeAutoDelete)
         homeDeleteDelayMillis = props.long("homeDeleteDelayMillis", homeDeleteDelayMillis)
+        healthForecastTicks = props.int("healthForecastTicks", healthForecastTicks).coerceIn(20, 200)
+        threatCorrelationWindowTicks = props.int("threatCorrelationWindowTicks", threatCorrelationWindowTicks).coerceIn(1, 80)
     }
 
     private fun JsonObject.bool(key: String, default: Boolean): Boolean = get(key)?.takeIf { it.isJsonPrimitive }?.asString?.toBooleanStrictOrNull() ?: default
@@ -350,5 +358,7 @@ object GrimSaverConfig {
         val moddedProjectileGravity: Double,
         val moddedProjectileHitboxRadius: Double,
         val moddedProjectileDrag: Double,
+        val healthForecastTicks: Int,
+        val threatCorrelationWindowTicks: Int,
     )
 }

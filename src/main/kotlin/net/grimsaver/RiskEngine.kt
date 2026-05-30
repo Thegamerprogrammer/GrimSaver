@@ -24,50 +24,135 @@ class RiskEngine(private val config: GrimSaverConfig = GrimSaverConfig) {
     private val confidenceModel = WeightedConfidenceModel(config)
     private val combatAnalyzer = EntityCombatAnalyzer(config)
     private val projectileEngine = ProjectileTrajectoryEngine(config, combatAnalyzer)
+    private val threatRegistry = UniversalThreatRegistry(config, combatAnalyzer)
+    private val correlationEngine = ThreatCorrelationEngine(config)
+    private val forecastEngine = HealthForecastEngine(config)
 
     fun assess(snapshot: WorldSnapshot): RiskAssessment {
         val history = healthVelocityTracker.record(snapshot)
         val burstLevel = burstDetectionSystem.detect(snapshot, history)
         val projectileRisks = if (config.projectileThreats) projectileEngine.analyze(snapshot) else emptyList()
-        val combatRisks = if (config.pvpThreats || config.mobThreats) snapshot.livingEntities.mapNotNull { combatAnalyzer.analyze(it, snapshot) } else emptyList()
+        val registryRisks = threatRegistry.collect(snapshot)
         val fallRisk = if (config.fallThreats) combatAnalyzer.fallRisk(snapshot.player) else CombatRisk.none()
-        val allCombatRisks = combatRisks + fallRisk.takeIf { it.predictedDamage > 0.0 }.orEmpty()
+        val allCombatRisks = registryRisks + fallRisk.takeIf { it.predictedDamage > 0.0 }.orEmpty()
+        val combatWindow = CombatWindow.from(snapshot.player, projectileRisks, allCombatRisks, environmentalDamageSources(snapshot.player))
+        val correlatedWindow = correlationEngine.correlate(combatWindow)
+        val forecast = forecastEngine.forecast(snapshot.player, correlatedWindow, max(0.5, config.safetyMargin))
+        val predictedIncomingDamage = correlatedWindow.totalDamageWithin(config.healthForecastTicks)
+        val environmentalDamage = correlatedWindow.sources.filter { it.kind == DamageSourceKind.ENVIRONMENT }.sumOf { it.damage }
         val bestProjectile = projectileRisks.maxWithOrNull(compareBy<ProjectileRisk> { it.confidence }.thenBy { it.predictedDamage })
         val bestCombat = allCombatRisks.maxByOrNull { it.weightedDamagePressure(snapshot.player.effectiveHealth) }
-        val predictedDamage = listOf(
-            bestProjectile?.predictedDamage ?: 0.0,
-            bestCombat?.predictedDamage ?: 0.0,
-            if (config.combineThreats) allCombatRisks.sumOf { it.predictedDamage } + projectileRisks.sumOf { it.predictedDamage } else 0.0
-        ).max()
-        val damageScore = pressure(predictedDamage, snapshot.player.effectiveHealth + config.safetyMargin)
+        val primaryDamageSource = correlatedWindow.sources.maxWithOrNull(compareBy<TimedDamage> { it.damage }.thenBy { it.confidence })
+        val damageScore = pressure(snapshot.player.effectiveHealth - forecast.predictedMinimumHealth, snapshot.player.effectiveHealth + forecast.survivalThreshold)
         val targetingScore = allCombatRisks.maxOfOrNull { it.targetingScore } ?: 0.0
         val enchantmentScore = allCombatRisks.maxOfOrNull { it.enchantmentRiskScore } ?: 0.0
         val trajectoryScore = bestProjectile?.confidence ?: 0.0
         val confidence = confidenceModel.confidence(history, burstLevel, damageScore, targetingScore, enchantmentScore, trajectoryScore)
-        val lethalProbability = confidenceModel.lethalProbability(confidence, predictedDamage, snapshot.player.effectiveHealth, burstLevel)
         val burstOverride = burstLevel.ordinal >= BurstLevel.CRITICAL.ordinal
-        val rapidDrop = history.velocity <= -config.burstVelocityThreshold || history.burstDetected || burstLevel.ordinal >= BurstLevel.MEDIUM.ordinal
-        val lethalByDamage = predictedDamage >= snapshot.player.effectiveHealth * config.lethalThreshold + config.safetyMargin
-        val shouldTrigger = config.enabled && rapidDrop && (burstOverride || (confidence >= config.lethalConfidenceThreshold && lethalByDamage))
+        val healthPredictionLethal = forecast.predictedMinimumHealth <= forecast.survivalThreshold
+        val shouldTrigger = config.enabled && (healthPredictionLethal || burstOverride) && confidence >= confidenceFloor(burstLevel, healthPredictionLethal)
         val source = when {
             burstOverride -> "health_burst"
+            primaryDamageSource != null -> primaryDamageSource.source
             bestProjectile != null && (bestCombat == null || bestProjectile.predictedDamage >= bestCombat.predictedDamage) -> bestProjectile.source
             bestCombat != null -> bestCombat.source
             else -> "none"
         }
+        val sourceEntityId = primaryDamageSource?.sourceEntityId ?: when {
+            bestProjectile != null && (bestCombat == null || bestProjectile.predictedDamage >= bestCombat.predictedDamage) -> bestProjectile.sourceEntityId
+            bestCombat != null -> bestCombat.sourceEntityId
+            else -> null
+        }
+        val trace = ThreatTrace(
+            forecast = forecast,
+            combatWindow = correlatedWindow,
+            primaryThreat = source,
+            secondaryThreat = correlatedWindow.sources
+                .filter { it.source != source }
+                .maxWithOrNull(compareBy<TimedDamage> { it.damage }.thenBy { it.confidence })
+                ?.source,
+            rejectedThreats = correlatedWindow.rejections,
+            trigger = shouldTrigger
+        )
         return RiskAssessment(
-            totalRiskScore = ((damageScore * 0.65) + (lethalProbability * 0.35)).coerceIn(0.0, 1.0),
+            totalRiskScore = ((damageScore * 0.55) + ((1.0 - forecast.survivalProbability) * 0.45)).coerceIn(0.0, 1.0),
             confidence = if (burstLevel == BurstLevel.LETHAL) 1.0 else confidence,
             burstLevel = burstLevel,
-            predictedDamage = if (burstOverride) max(predictedDamage, snapshot.player.effectiveHealth + config.safetyMargin + 1.0) else predictedDamage,
+            predictedDamage = if (burstOverride) max(predictedIncomingDamage, snapshot.player.effectiveHealth + config.safetyMargin + 1.0) else predictedIncomingDamage,
             healthVelocity = history.velocity,
-            lethalProbability = if (burstLevel == BurstLevel.LETHAL) 1.0 else lethalProbability,
+            lethalProbability = if (burstLevel == BurstLevel.LETHAL) 1.0 else (1.0 - forecast.survivalProbability).coerceIn(0.0, 1.0),
             primaryThreatSource = source,
-            shouldTriggerSetHome = shouldTrigger
+            shouldTriggerSetHome = shouldTrigger,
+            predictedRemainingHealth = forecast.predictedMinimumHealth,
+            environmentalDamage = environmentalDamage,
+            sourceEntityId = sourceEntityId,
+            forecast = forecast,
+            trace = trace
         )
     }
 
+    private fun environmentalDamageSources(player: PlayerSnapshot): List<TimedDamage> = player.activeEffects.mapNotNull { effect ->
+        when {
+            effect.matches("wither") -> TimedDamage(
+                tick = 20,
+                damage = min(12.0, (effect.durationTicks / 20.0) * (effect.amplifier + 1)),
+                source = "wither",
+                confidence = 0.92,
+                kind = DamageSourceKind.ENVIRONMENT,
+                reason = "Wither effect ${effect.durationTicks} ticks"
+            )
+            effect.matches("poison") && player.effectiveHealth <= config.criticalHealthHearts * 2.0 -> TimedDamage(
+                tick = 25,
+                damage = min(player.health - 1.0, (effect.durationTicks / 25.0) * (effect.amplifier + 1)).coerceAtLeast(0.0),
+                source = "poison",
+                confidence = 0.72,
+                kind = DamageSourceKind.ENVIRONMENT,
+                reason = "Poison effect at low health"
+            )
+            effect.matches("fire") && !player.fireImmune -> TimedDamage(
+                tick = 20,
+                damage = 2.0,
+                source = "fire",
+                confidence = 0.70,
+                kind = DamageSourceKind.ENVIRONMENT,
+                reason = "Fire tick"
+            )
+            else -> null
+        }
+    }
+
     private fun pressure(value: Double, limit: Double): Double = if (limit <= 0.0) 1.0 else (value / limit).coerceIn(0.0, 1.0)
+
+    private fun healthCentricLethalProbability(confidence: Double, predictedRemainingHealth: Double, survivalThreshold: Double, burstLevel: BurstLevel): Double {
+        val healthPressure = ((survivalThreshold - predictedRemainingHealth) / survivalThreshold.coerceAtLeast(0.5)).coerceIn(0.0, 1.0)
+        val burstBonus = when (burstLevel) {
+            BurstLevel.LETHAL -> 1.0
+            BurstLevel.CRITICAL -> 0.35
+            BurstLevel.MEDIUM -> 0.18
+            BurstLevel.SMALL -> 0.06
+            BurstLevel.NONE -> 0.0
+        }
+        return (healthPressure * 0.7 + confidence * 0.3 + burstBonus).coerceIn(0.0, 1.0)
+    }
+
+    private fun confidenceFloor(burstLevel: BurstLevel, healthPredictionLethal: Boolean): Double = when {
+        burstLevel.ordinal >= BurstLevel.CRITICAL.ordinal -> 0.55
+        healthPredictionLethal -> 0.20
+        else -> config.lethalConfidenceThreshold
+    }
+
+    private fun environmentalDamage(player: PlayerSnapshot): Double {
+        val effectDamage = player.activeEffects.sumOf { effect ->
+            when {
+                effect.matches("wither") -> min(12.0, (effect.durationTicks / 20.0) * (effect.amplifier + 1))
+                effect.matches("poison") && player.effectiveHealth <= config.criticalHealthHearts * 2.0 -> min(player.health - 1.0, (effect.durationTicks / 25.0) * (effect.amplifier + 1)).coerceAtLeast(0.0)
+                effect.matches("fire") && !player.fireImmune -> 2.0
+                else -> 0.0
+            }
+        }
+        val regenCredit = player.regenerationPerSecond * 2.0
+        return (effectDamage - regenCredit).coerceAtLeast(0.0)
+    }
 }
 
 data class HealthHistory(
@@ -87,19 +172,24 @@ data class RiskAssessment(
     val healthVelocity: Double,
     val lethalProbability: Double,
     val primaryThreatSource: String,
-    val shouldTriggerSetHome: Boolean
+    val shouldTriggerSetHome: Boolean,
+    val predictedRemainingHealth: Double = Double.POSITIVE_INFINITY,
+    val environmentalDamage: Double = 0.0,
+    val sourceEntityId: Int? = null,
+    val forecast: HealthForecast? = null,
+    val trace: ThreatTrace? = null
 ) {
     fun toThreat(snapshot: WorldSnapshot): Threat = Threat(
         kind = if (burstLevel.ordinal >= BurstLevel.MEDIUM.ordinal) ThreatKind.BURST_DAMAGE else ThreatKind.COMBINED,
         damage = max(predictedDamage, snapshot.player.effectiveHealth + GrimSaverConfig.safetyMargin + 1.0),
         health = snapshot.player.effectiveHealth,
         source = primaryThreatSource,
-        reason = "RiskEngine ${burstLevel.name.lowercase()} risk confidence=${(confidence * 100.0).toInt()}% velocity=${"%.2f".format(healthVelocity)} hp/s predicted=${"%.1f".format(predictedDamage)}",
+        reason = "RiskEngine ${burstLevel.name.lowercase()} risk confidence=${(confidence * 100.0).toInt()}% velocity=${"%.2f".format(healthVelocity)} hp/s predicted=${"%.1f".format(predictedDamage)} remaining=${"%.1f".format(predictedRemainingHealth)} env=${"%.1f".format(environmentalDamage)}",
         confidence = confidence,
         position = snapshot.player.position,
         predictedDamage = predictedDamage,
         lethalProbability = lethalProbability,
-        sourceEntityId = null
+        sourceEntityId = sourceEntityId
     )
 }
 
@@ -187,7 +277,8 @@ data class ProjectileRisk(
     val ticksToImpact: Int,
     val predictedDamage: Double,
     val confidence: Double,
-    val source: String
+    val source: String,
+    val sourceEntityId: Int? = null
 )
 
 class ProjectileTrajectoryEngine(private val config: GrimSaverConfig, private val combatAnalyzer: EntityCombatAnalyzer) {
@@ -200,7 +291,7 @@ class ProjectileTrajectoryEngine(private val config: GrimSaverConfig, private va
             else -> 0.0
         }
         val confidence = ((baseProjectileConfidence(projectile) * 0.35) + (prediction.confidence * 0.45) + timing + (prediction.damage / max(1.0, snapshot.player.effectiveHealth)) * 0.12).coerceIn(0.0, 1.0)
-        ProjectileRisk(impact.ticksToImpact, prediction.damage, confidence, prediction.source)
+        ProjectileRisk(impact.ticksToImpact, prediction.damage, confidence, prediction.source, projectile.ownerId ?: projectile.id)
     }
 
     private fun simulate(projectile: ProjectileSnapshot, playerBox: AABB, maxTicks: Int): ProjectileImpact? {
@@ -249,11 +340,242 @@ data class CombatRisk(
     val targetingScore: Double,
     val enchantmentRiskScore: Double,
     val source: String,
-    val reason: String
+    val reason: String,
+    val sourceEntityId: Int? = null,
+    val maximumDamage: Double = predictedDamage,
+    val attackIntervalTicks: Int = 20,
+    val specialEffects: List<String> = emptyList(),
+    val ticksUntilImpact: Int = attackIntervalTicks
 ) {
     fun weightedDamagePressure(effectiveHealth: Double): Double = predictedDamage / max(1.0, effectiveHealth) + targetingScore * 0.25 + enchantmentRiskScore * 0.1
     companion object {
         fun none() = CombatRisk(0.0, 0.0, 0.0, "none", "No threat")
+    }
+}
+
+
+data class HealthForecast(
+    val currentHealth: Double,
+    val predictedMinimumHealth: Double,
+    val predictedHealthTimeline: List<Double>,
+    val survivalProbability: Double,
+    val lethalTick: Int?,
+    val survivalThreshold: Double
+)
+
+data class CombatWindow(
+    val horizonTicks: Int,
+    val sources: List<TimedDamage>,
+    val rejections: List<ThreatRejection> = emptyList()
+) {
+    fun totalDamageWithin(ticks: Int): Double = sources.filter { it.tick <= ticks }.sumOf { it.damage }
+
+    companion object {
+        fun from(player: PlayerSnapshot, projectiles: List<ProjectileRisk>, combat: List<CombatRisk>, environmental: List<TimedDamage>): CombatWindow {
+            val projectileSources = projectiles.map { projectile ->
+                TimedDamage(
+                    tick = projectile.ticksToImpact,
+                    damage = projectile.predictedDamage,
+                    source = projectile.source,
+                    confidence = projectile.confidence,
+                    kind = DamageSourceKind.PROJECTILE,
+                    sourceEntityId = projectile.sourceEntityId,
+                    reason = "Predicted projectile impact"
+                )
+            }
+            val combatSources = combat.map { risk ->
+                TimedDamage(
+                    tick = risk.ticksUntilImpact.coerceAtLeast(1),
+                    damage = risk.predictedDamage,
+                    source = risk.source,
+                    confidence = (0.45 + risk.targetingScore * 0.4 + risk.enchantmentRiskScore * 0.15).coerceIn(0.0, 1.0),
+                    kind = DamageSourceKind.ENTITY,
+                    sourceEntityId = risk.sourceEntityId,
+                    reason = risk.reason,
+                    maximumDamage = risk.maximumDamage,
+                    specialEffects = risk.specialEffects
+                )
+            }
+            return CombatWindow(GrimSaverConfig.healthForecastTicks, projectileSources + combatSources + environmental)
+        }
+    }
+}
+
+data class TimedDamage(
+    val tick: Int,
+    val damage: Double,
+    val source: String,
+    val confidence: Double,
+    val kind: DamageSourceKind,
+    val sourceEntityId: Int? = null,
+    val reason: String = "",
+    val maximumDamage: Double = damage,
+    val specialEffects: List<String> = emptyList()
+)
+
+enum class DamageSourceKind { PROJECTILE, ENTITY, ENVIRONMENT, FALL }
+
+data class ThreatRejection(
+    val entity: String,
+    val reason: String,
+    val impactProbability: Double,
+    val requiredProbability: Double
+)
+
+data class ThreatTrace(
+    val forecast: HealthForecast,
+    val combatWindow: CombatWindow,
+    val primaryThreat: String,
+    val secondaryThreat: String?,
+    val rejectedThreats: List<ThreatRejection>,
+    val trigger: Boolean
+)
+
+class HealthForecastEngine(private val config: GrimSaverConfig) {
+    fun forecast(player: PlayerSnapshot, window: CombatWindow, survivalThreshold: Double): HealthForecast {
+        val horizon = config.healthForecastTicks.coerceIn(20, 200)
+        val damageByTick = window.sources
+            .filter { it.tick in 1..horizon && it.confidence >= 0.20 }
+            .groupBy { it.tick }
+            .mapValues { (_, hits) -> hits.sumOf { it.damage } }
+        val timeline = ArrayList<Double>(horizon + 1)
+        var health = player.effectiveHealth
+        var minimum = health
+        var lethalTick: Int? = null
+        timeline += health
+        for (tick in 1..horizon) {
+            health += player.regenerationPerSecond / 20.0
+            health -= damageByTick[tick] ?: 0.0
+            minimum = min(minimum, health)
+            if (lethalTick == null && health <= survivalThreshold) lethalTick = tick
+            timeline += health
+        }
+        val deficit = (survivalThreshold - minimum).coerceAtLeast(0.0)
+        val survivalProbability = (1.0 - deficit / max(1.0, player.effectiveHealth)).coerceIn(0.0, 1.0)
+        return HealthForecast(player.effectiveHealth, minimum, timeline, survivalProbability, lethalTick, survivalThreshold)
+    }
+}
+
+class ThreatCorrelationEngine(private val config: GrimSaverConfig) {
+    fun correlate(window: CombatWindow): CombatWindow {
+        val requiredProbability = (config.lethalConfidenceThreshold * 0.55).coerceIn(0.25, 0.75)
+        val accepted = mutableListOf<TimedDamage>()
+        val rejected = mutableListOf<ThreatRejection>()
+        for (source in window.sources) {
+            if (source.confidence < requiredProbability && source.damage < 4.0) {
+                rejected += ThreatRejection(source.source, "Low Impact Probability", source.confidence, requiredProbability)
+            } else {
+                accepted += source
+            }
+        }
+        val correlated = accepted.filter { candidate ->
+            candidate.kind == DamageSourceKind.ENVIRONMENT || accepted.any { other ->
+                other === candidate || abs(other.tick - candidate.tick) <= config.threatCorrelationWindowTicks
+            }
+        }
+        return window.copy(sources = correlated, rejections = rejected)
+    }
+}
+
+
+class UniversalThreatRegistry(
+    private val config: GrimSaverConfig,
+    private val combatAnalyzer: EntityCombatAnalyzer
+) {
+    fun collect(snapshot: WorldSnapshot): List<CombatRisk> = snapshot.livingEntities.mapNotNull { entity ->
+        val profile = profile(entity) ?: return@mapNotNull null
+        val intelligence = combatAnalyzer.intelligence(entity, snapshot)
+        if (!entity.isPlayer && profile.passive && !intelligence.isTargetingPlayer && !profile.aggressiveState(entity, intelligence)) return@mapNotNull null
+        if (entity.isPlayer && !config.pvpThreats) return@mapNotNull null
+        if (!entity.isPlayer && !config.mobThreats) return@mapNotNull null
+        val base = combatAnalyzer.analyze(entity, snapshot) ?: profileFallback(entity, snapshot, profile, intelligence) ?: return@mapNotNull null
+        base.copy(
+            sourceEntityId = entity.id,
+            maximumDamage = max(base.maximumDamage, profile.maximumDamage(entity, snapshot.player)),
+            attackIntervalTicks = profile.attackIntervalTicks,
+            specialEffects = profile.specialEffects(entity)
+        )
+    }
+
+    private fun profileFallback(entity: LivingSnapshot, snapshot: WorldSnapshot, profile: ThreatProfile, intelligence: EntityIntelligence): CombatRisk? {
+        val distance = entity.position.distanceTo(snapshot.player.position)
+        val pressure = when {
+            intelligence.isTargetingPlayer -> 1.0
+            distance <= profile.reach(entity) + config.meleeRangePadding -> 0.8
+            profile.hostile && distance <= max(6.0, profile.reach(entity) + 2.0) -> 0.45
+            else -> 0.0
+        }
+        if (pressure <= 0.0) return null
+        val damage = DamagePredictor.melee(entity, snapshot.player).damage.takeIf { it > 0.0 }
+            ?: profile.expectedDamage(entity, snapshot.player)
+        return CombatRisk(
+            predictedDamage = damage,
+            targetingScore = pressure,
+            enchantmentRiskScore = 0.0,
+            source = entity.name.ifBlank { entity.typeName },
+            reason = "Universal threat registry ${profile.key}",
+            sourceEntityId = entity.id,
+            maximumDamage = profile.maximumDamage(entity, snapshot.player),
+            attackIntervalTicks = profile.attackIntervalTicks,
+            specialEffects = profile.specialEffects(entity)
+        )
+    }
+
+    private fun profile(entity: LivingSnapshot): ThreatProfile? {
+        if (entity.isPlayer) return PLAYER_PROFILE
+        val type = entity.typeName.lowercase()
+        return PROFILES.firstOrNull { profile -> profile.aliases.any(type::contains) }
+    }
+
+    data class ThreatProfile(
+        val key: String,
+        val aliases: List<String>,
+        val baseDamage: Double,
+        val maxDamage: Double,
+        val baseReach: Double,
+        val attackIntervalTicks: Int,
+        val hostile: Boolean = true,
+        val passive: Boolean = false,
+        val effectProvider: (LivingSnapshot) -> List<String> = { emptyList() }
+    ) {
+        fun expectedDamage(entity: LivingSnapshot, player: PlayerSnapshot): Double = max(baseDamage, entity.attackDamage).coerceAtLeast(0.0)
+        fun maximumDamage(entity: LivingSnapshot, player: PlayerSnapshot): Double = max(maxDamage, max(baseDamage, entity.attackDamage) * 1.5)
+        fun reach(entity: LivingSnapshot): Double = max(baseReach, entity.attackRange)
+        fun specialEffects(entity: LivingSnapshot): List<String> = effectProvider(entity)
+        fun aggressiveState(entity: LivingSnapshot, intelligence: EntityIntelligence): Boolean = hostile || entity.isEnemy || intelligence.sprintOrChaseBehavior
+    }
+
+    private companion object {
+        val PLAYER_PROFILE = ThreatProfile("player", listOf("player"), 1.0, 30.0, 3.0, 12)
+        val PROFILES = listOf(
+            ThreatProfile("zombie", listOf("zombie", "husk", "drowned"), 3.0, 9.0, 2.0, 20),
+            ThreatProfile("skeleton", listOf("skeleton", "stray", "bogged"), 4.0, 12.0, 16.0, 25, effectProvider = { listOf("ranged") }),
+            ThreatProfile("creeper", listOf("creeper"), 20.0, 49.0, 6.0, 30, effectProvider = { listOf("explosion") }),
+            ThreatProfile("spider", listOf("spider", "cave_spider"), 2.0, 7.0, 2.0, 20, effectProvider = { if (it.typeName.contains("cave", true)) listOf("poison") else emptyList() }),
+            ThreatProfile("enderman", listOf("enderman"), 7.0, 14.0, 3.0, 20),
+            ThreatProfile("piglin", listOf("piglin", "piglin_brute"), 5.0, 19.0, 3.0, 20),
+            ThreatProfile("hoglin", listOf("hoglin", "zoglin"), 6.0, 18.0, 3.0, 20),
+            ThreatProfile("blaze", listOf("blaze"), 6.0, 12.0, 16.0, 20, effectProvider = { listOf("fire") }),
+            ThreatProfile("ghast", listOf("ghast"), 9.0, 25.0, 64.0, 40, effectProvider = { listOf("explosion", "fire") }),
+            ThreatProfile("witch", listOf("witch"), 6.0, 18.0, 16.0, 40, effectProvider = { listOf("potion", "poison") }),
+            ThreatProfile("ravager", listOf("ravager"), 12.0, 24.0, 4.0, 20),
+            ThreatProfile("illager", listOf("vindicator", "evoker", "pillager"), 6.0, 15.0, 16.0, 25, effectProvider = { listOf("ranged_or_magic") }),
+            ThreatProfile("shulker", listOf("shulker"), 4.0, 10.0, 24.0, 20, effectProvider = { listOf("levitation") }),
+            ThreatProfile("guardian", listOf("guardian", "elder_guardian"), 6.0, 12.0, 16.0, 40, effectProvider = { listOf("laser") }),
+            ThreatProfile("warden", listOf("warden"), 30.0, 45.0, 20.0, 30, effectProvider = { listOf("sonic_boom") }),
+            ThreatProfile("boss", listOf("wither", "ender_dragon"), 15.0, 49.0, 32.0, 20, effectProvider = { listOf("boss") }),
+            ThreatProfile("slime", listOf("slime", "magma_cube"), 4.0, 12.0, 2.0, 20, effectProvider = { if (it.typeName.contains("magma", true)) listOf("fire") else emptyList() }),
+            ThreatProfile("phantom", listOf("phantom"), 6.0, 12.0, 3.0, 20),
+            ThreatProfile("breeze", listOf("breeze"), 6.0, 12.0, 16.0, 20, effectProvider = { listOf("wind_charge") }),
+            ThreatProfile("iron_golem", listOf("iron_golem"), 15.0, 32.0, 3.0, 20, hostile = false, passive = true),
+            ThreatProfile("snow_golem", listOf("snow_golem"), 1.0, 3.0, 12.0, 20, hostile = false, passive = true),
+            ThreatProfile("bee", listOf("bee"), 2.0, 6.0, 2.0, 20, hostile = false, passive = true, effectProvider = { listOf("poison") }),
+            ThreatProfile("wolf", listOf("wolf"), 4.0, 8.0, 2.0, 20, hostile = false, passive = true),
+            ThreatProfile("goat", listOf("goat"), 2.0, 8.0, 4.0, 40, hostile = false, passive = true, effectProvider = { listOf("ram") }),
+            ThreatProfile("llama", listOf("llama", "trader_llama"), 1.0, 3.0, 10.0, 20, hostile = false, passive = true, effectProvider = { listOf("spit") }),
+            ThreatProfile("dolphin", listOf("dolphin"), 2.0, 5.0, 2.0, 20, hostile = false, passive = true),
+            ThreatProfile("fox", listOf("fox"), 2.0, 8.0, 2.0, 20, hostile = false, passive = true)
+        )
     }
 }
 
@@ -267,7 +589,7 @@ class EntityCombatAnalyzer(private val config: GrimSaverConfig = GrimSaverConfig
         }
         if (!intelligence.isAggressive && intelligence.attackRangePressure <= 0.0 && !intelligence.fallingAttack) return null
         val prediction = meleeDamage(attacker, snapshot.player, intelligence)
-        return CombatRisk(prediction.damage, intelligence.targetingScore, enchantmentRisk(attacker.mainHand), prediction.source, prediction.reason)
+        return CombatRisk(prediction.damage, intelligence.targetingScore, enchantmentRisk(attacker.mainHand), prediction.source, prediction.reason, sourceEntityId = attacker.id)
     }
 
     fun projectileDamage(projectile: ProjectileSnapshot, player: PlayerSnapshot): DamagePrediction = DamagePredictor.projectile(projectile, player)
@@ -278,7 +600,7 @@ class EntityCombatAnalyzer(private val config: GrimSaverConfig = GrimSaverConfig
         val raw = 36.0 * exposure * exposure + if (creeper.creeperSwelling) 8.0 else 0.0
         val reduced = reduceWithArmorAndEnchantments(raw, player, DamageChannel.EXPLOSION)
         val targeting = max(0.85, max(intelligence.targetingScore, if (creeper.creeperSwelling) 1.0 else 0.0))
-        return CombatRisk(reduced, targeting, 0.0, creeper.typeName, "RiskEngine creeper explosion pressure")
+        return CombatRisk(reduced, targeting, 0.0, creeper.typeName, "RiskEngine creeper explosion pressure", sourceEntityId = creeper.id, maximumDamage = 49.0, attackIntervalTicks = 30, specialEffects = listOf("explosion"))
     }
 
     fun fallRisk(player: PlayerSnapshot): CombatRisk {
