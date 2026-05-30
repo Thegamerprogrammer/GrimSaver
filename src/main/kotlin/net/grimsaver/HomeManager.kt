@@ -49,7 +49,7 @@ class HomeManager(private val logger: LastStandLogger) {
         val file = fileForServer(serverKey)
         val state = readState(file, serverKey)
         val next = nextDeathNumber(state)
-        val homeName = "death$next"
+        val homeName = next.toString()
         val savedHome = SavedHome(
             name = homeName,
             timestamp = Instant.now(),
@@ -94,18 +94,19 @@ class HomeManager(private val logger: LastStandLogger) {
             runCatching {
                 val parsed = Files.newBufferedReader(file).use { JsonParser.parseReader(it).asJsonObject }
                 val homes = parsed.getAsJsonArray("homes")?.mapNotNull { element ->
-                    runCatching { element.asString }.getOrNull()?.takeIf { it.startsWith("death") }
+                    runCatching { element.asString }.getOrNull()?.takeIf { slotNumber(it) in 1..4 }
                 }?.toMutableSet() ?: mutableSetOf()
                 val records = parsed.getAsJsonArray("records")?.mapNotNull { element ->
                     runCatching { gson.fromJson(element, SavedHomeRecord::class.java) }.getOrNull()
-                }?.filter { it.name.startsWith("death") } ?: emptyList()
-                homes += records.map { it.name }
+                }?.filter { slotNumber(it.name) in 1..4 }
+                    ?.map { it.copy(name = normalizeSlotName(it.name) ?: it.name) } ?: emptyList()
+                homes += records.mapNotNull { normalizeSlotName(it.name) }
                 val lastDeathNumber = maxOf(
                     parsed.get("lastDeathNumber")?.let { runCatching { it.asInt }.getOrNull() } ?: 0,
                     homes.maxDeathNumber()
                 )
                 val nextSlot = parsed.get("nextSlot")?.let { runCatching { it.asInt }.getOrNull() }?.coerceIn(1, 4) ?: ((lastDeathNumber % GrimSaverConfig.homeMaxSlots.coerceIn(1, 4)) + 1)
-                return HomeState(lastDeathNumber, nextSlot, homes.filter { slotNumber(it) in 1..GrimSaverConfig.homeMaxSlots.coerceIn(1, 4) }.toSet(), records.filter { slotNumber(it.name) in 1..GrimSaverConfig.homeMaxSlots.coerceIn(1, 4) })
+                return HomeState(lastDeathNumber, nextSlot, homes.mapNotNull { normalizeSlotName(it) }.filter { slotNumber(it) in 1..GrimSaverConfig.homeMaxSlots.coerceIn(1, 4) }.toSet(), records.filter { slotNumber(it.name) in 1..GrimSaverConfig.homeMaxSlots.coerceIn(1, 4) })
             }.onFailure { throwable ->
                 warnGrimSaverFailure("homes-read-${file.fileName}", "Malformed GrimSaver home file; preserving it and starting with empty state", throwable)
             }
@@ -119,8 +120,8 @@ class HomeManager(private val logger: LastStandLogger) {
         if (!legacyFile.exists()) return HomeState()
         return runCatching {
             val records = Files.readAllLines(legacyFile).mapNotNull(::parseLegacyRecord)
-            val homes = records.map { it.name }.toMutableSet()
-            HomeState(homes.maxDeathNumber(), ((homes.maxDeathNumber() % GrimSaverConfig.homeMaxSlots.coerceIn(1, 4)) + 1), homes, records)
+            val homes = records.mapNotNull { normalizeSlotName(it.name) }.toMutableSet()
+            HomeState(homes.maxDeathNumber(), ((homes.maxDeathNumber() % GrimSaverConfig.homeMaxSlots.coerceIn(1, 4)) + 1), homes, records.map { it.copy(name = normalizeSlotName(it.name) ?: it.name) })
         }.getOrElse { throwable ->
             warnGrimSaverFailure("legacy-homes-read-${legacyFile.fileName}", "Unable to read legacy GrimSaver home file; ignoring legacy state", throwable)
             HomeState()
@@ -142,11 +143,11 @@ class HomeManager(private val logger: LastStandLogger) {
         scheduleDelete(client, home)
     }
 
-    private fun normalizeHomeName(token: String): String? {
-        val numeric = token.toIntOrNull()?.takeIf { it in 1..4 }?.let { "death$it" }
-        val named = token.takeIf { DEATH_NAME.matches(it) }
-        return numeric ?: named
-    }
+    private fun normalizeHomeName(token: String): String? = normalizeSlotName(token)
+
+    private fun normalizeSlotName(token: String): String? = slotNumber(token)
+        .takeIf { it in 1..4 }
+        ?.toString()
 
     private fun scheduleDelete(client: Minecraft, homeName: String) {
         if (!GrimSaverConfig.homeAutoDelete) return
@@ -190,7 +191,7 @@ class HomeManager(private val logger: LastStandLogger) {
 
     private fun parseLegacyRecord(line: String): SavedHomeRecord? {
         parseDelimitedRecord(line)?.let { return it }
-        val name = DEATH_NAME.find(line)?.value ?: return null
+        val name = DEATH_NAME.find(line)?.groupValues?.get(1) ?: NUMERIC_HOME.find(line)?.value ?: return null
         val coords = LEGACY_COORDS.find(line)?.groupValues
         val position = if (coords != null) PositionDto(coords[1].toDouble(), coords[2].toDouble(), coords[3].toDouble()) else PositionDto.ZERO
         return SavedHomeRecord(
@@ -238,9 +239,9 @@ class HomeManager(private val logger: LastStandLogger) {
         )
     }
 
-    private fun slotNumber(name: String): Int = DEATH_NAME.matchEntire(name)?.groupValues?.get(1)?.toIntOrNull() ?: Int.MAX_VALUE
+    private fun slotNumber(name: String): Int = name.toIntOrNull() ?: DEATH_NAME.matchEntire(name)?.groupValues?.get(1)?.toIntOrNull() ?: Int.MAX_VALUE
 
-    private fun HomeState.toDto(): HomeStateDto = HomeStateDto(lastDeathNumber, nextSlot, homes.sortedWith(DEATH_NAME_COMPARATOR), records)
+    private fun HomeState.toDto(): HomeStateDto = HomeStateDto(lastDeathNumber, nextSlot, homes.sortedWith(HOME_SLOT_COMPARATOR), records)
 
     private fun SavedHome.toRecord(): SavedHomeRecord = SavedHomeRecord(
         name = name,
@@ -265,7 +266,7 @@ class HomeManager(private val logger: LastStandLogger) {
     }.getOrNull()
 
     private fun Set<String>.maxDeathNumber(): Int = maxOfOrNull { home ->
-        DEATH_NAME.matchEntire(home)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+        slotNumber(home).takeIf { it != Int.MAX_VALUE } ?: 0
     } ?: 0
 
     private fun ThreatKind.isEmergency(): Boolean = when (this) {
@@ -316,8 +317,9 @@ class HomeManager(private val logger: LastStandLogger) {
     }
 
     private companion object {
-        val DEATH_NAME = Regex("death(\\d+)")
-        val LEGACY_COORDS = Regex("x=([\\d.-]+) y=([\\d.-]+) z=([\\d.-]+)")
-        val DEATH_NAME_COMPARATOR = compareBy<String> { DEATH_NAME.matchEntire(it)?.groupValues?.get(1)?.toIntOrNull() ?: Int.MAX_VALUE }.thenBy { it }
+        val DEATH_NAME = Regex("""death(\d+)""", RegexOption.IGNORE_CASE)
+        val NUMERIC_HOME = Regex("""\b[1-4]\b""")
+        val LEGACY_COORDS = Regex("""x=([\d.-]+) y=([\d.-]+) z=([\d.-]+)""")
+        val HOME_SLOT_COMPARATOR = compareBy<String> { it.toIntOrNull() ?: DEATH_NAME.matchEntire(it)?.groupValues?.get(1)?.toIntOrNull() ?: Int.MAX_VALUE }.thenBy { it }
     }
 }

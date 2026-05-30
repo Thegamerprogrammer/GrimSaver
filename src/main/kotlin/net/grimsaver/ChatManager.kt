@@ -55,7 +55,7 @@ class ChatManager(private val homeManager: HomeManager) {
 
     private fun handleSet(client: Minecraft, args: List<String>) {
         if (args.size < 2) {
-            sendSystem(client, Component.literal("§cUsage: .grimsaver set <key> <value>"), false)
+            sendSystem(client, Component.literal("§cUsage: *grimsaver set <key> <value>"), false)
             return
         }
         val key = args[0].lowercase()
@@ -83,27 +83,33 @@ class ChatManager(private val homeManager: HomeManager) {
         when (args[0].lowercase()) {
             "max" -> {
                 val max = args.getOrNull(1)?.toIntOrNull()?.coerceIn(1, 4)
-                if (max == null) sendSystem(client, Component.literal("§cUsage: .grimsaver home max <1-4>"), false) else {
+                if (max == null) sendSystem(client, Component.literal("§cUsage: *grimsaver home max <1-4>"), false) else {
                     GrimSaverConfig.homeMaxSlots = max
                     saveAndAck(client, "homeMaxSlots", max)
                 }
             }
             "automax", "usemax" -> {
-                GrimSaverConfig.homeUseMaxSlot = args.getOrNull(1)?.toBooleanStrictOrNull() ?: !GrimSaverConfig.homeUseMaxSlot
-                saveAndAck(client, "homeUseMaxSlot", GrimSaverConfig.homeUseMaxSlot)
+                val enabled = args.getOrNull(1)?.toBooleanStrictOrNull()
+                if (enabled == null) sendSystem(client, Component.literal("§cUsage: *gs home useMax <true|false>"), false) else {
+                    GrimSaverConfig.homeUseMaxSlot = enabled
+                    saveAndAck(client, "homeUseMaxSlot", GrimSaverConfig.homeUseMaxSlot)
+                }
             }
             "autodelete" -> {
-                GrimSaverConfig.homeAutoDelete = args.getOrNull(1)?.toBooleanStrictOrNull() ?: !GrimSaverConfig.homeAutoDelete
-                saveAndAck(client, "homeAutoDelete", GrimSaverConfig.homeAutoDelete)
+                val enabled = args.getOrNull(1)?.toBooleanStrictOrNull()
+                if (enabled == null) sendSystem(client, Component.literal("§cUsage: *gs home autoDelete <true|false>"), false) else {
+                    GrimSaverConfig.homeAutoDelete = enabled
+                    saveAndAck(client, "homeAutoDelete", GrimSaverConfig.homeAutoDelete)
+                }
             }
             "deletedelay" -> {
                 val delay = args.getOrNull(1)?.toLongOrNull()?.coerceIn(0L, 60_000L)
-                if (delay == null) sendSystem(client, Component.literal("§cUsage: .grimsaver home deleteDelay <millis>"), false) else {
+                if (delay == null) sendSystem(client, Component.literal("§cUsage: *grimsaver home deleteDelay <millis>"), false) else {
                     GrimSaverConfig.homeDeleteDelayMillis = delay
                     saveAndAck(client, "homeDeleteDelayMillis", delay)
                 }
             }
-            else -> sendSystem(client, Component.literal("§cUsage: .grimsaver home max|autoDelete|deleteDelay|useMax ..."), false)
+            else -> sendSystem(client, Component.literal("§cUsage: *grimsaver home max|autoDelete|deleteDelay|useMax ..."), false)
         }
     }
 
@@ -113,7 +119,7 @@ class ChatManager(private val homeManager: HomeManager) {
     }
 
     private fun sendHelp(client: Minecraft) {
-        sendSystem(client, Component.literal("§6GrimSaver §7| Commands: .grimsaver risk enable|debug, .grimsaver set burstThreshold 6.0, .grimsaver set healthWeight 0.5, .grimsaver home max 4, .grimsaver home autoDelete true, .grimsaver home deleteDelay 6000"), false)
+        sendSystem(client, Component.literal("§6GrimSaver §7| Commands: *grimsaver risk enable|debug, *grimsaver set burstThreshold 6.0, *gs set healthWeight 0.5, *gs home max 4, *gs home autoDelete true, *gs home deleteDelay 6000"), false)
     }
 
     fun showSavedHomes(client: Minecraft) {
@@ -160,7 +166,7 @@ class ChatManager(private val homeManager: HomeManager) {
 
     private fun isGrimSaverCommand(message: String): Boolean {
         val first = message.trim().substringBefore(' ')
-        return first.equals(".grimsaver", ignoreCase = true) || first.equals(".gs", ignoreCase = true)
+        return first.equals("*grimsaver", ignoreCase = true) || first.equals("*gs", ignoreCase = true)
     }
 
     private fun readIntField(chat: ChatComponent, name: String): Int? = field(chat, name, Int::class.javaPrimitiveType)?.getInt(chat)

@@ -96,7 +96,10 @@ data class RiskAssessment(
         source = primaryThreatSource,
         reason = "RiskEngine ${burstLevel.name.lowercase()} risk confidence=${(confidence * 100.0).toInt()}% velocity=${"%.2f".format(healthVelocity)} hp/s predicted=${"%.1f".format(predictedDamage)}",
         confidence = confidence,
-        position = snapshot.player.position
+        position = snapshot.player.position,
+        predictedDamage = predictedDamage,
+        lethalProbability = lethalProbability,
+        sourceEntityId = null
     )
 }
 
@@ -196,7 +199,7 @@ class ProjectileTrajectoryEngine(private val config: GrimSaverConfig, private va
             impact.ticksToImpact <= 15 -> 0.05
             else -> 0.0
         }
-        val confidence = (baseProjectileConfidence(projectile) + timing + (prediction.damage / max(1.0, snapshot.player.effectiveHealth)) * 0.12).coerceIn(0.0, 1.0)
+        val confidence = ((baseProjectileConfidence(projectile) * 0.35) + (prediction.confidence * 0.45) + timing + (prediction.damage / max(1.0, snapshot.player.effectiveHealth)) * 0.12).coerceIn(0.0, 1.0)
         ProjectileRisk(impact.ticksToImpact, prediction.damage, confidence, prediction.source)
     }
 
@@ -218,11 +221,11 @@ class ProjectileTrajectoryEngine(private val config: GrimSaverConfig, private va
     private fun projectileInfo(projectile: ProjectileSnapshot): ProjectileInfo {
         val type = projectile.typeName.lowercase()
         return when {
-            "arrow" in type || "trident" in type -> ProjectileInfo(0.05, 0.5, 0.99)
-            "potion" in type -> ProjectileInfo(0.05, 0.25, 0.99)
-            "firework" in type -> ProjectileInfo(0.0, 0.25, 1.0)
-            "fireball" in type || "wind_charge" in type -> ProjectileInfo(0.0, 1.0, 1.0)
-            else -> ProjectileInfo(config.moddedProjectileGravity, config.moddedProjectileHitboxRadius, config.moddedProjectileDrag)
+            "arrow" in type || "trident" in type -> ProjectileInfo(projectile.gravity, 0.5, 0.99)
+            "potion" in type -> ProjectileInfo(projectile.gravity, 0.25, 0.99)
+            "firework" in type -> ProjectileInfo(projectile.gravity, 0.25, 1.0)
+            "fireball" in type || "wind_charge" in type -> ProjectileInfo(projectile.gravity, 1.0, 1.0)
+            else -> ProjectileInfo(projectile.gravity, config.moddedProjectileHitboxRadius, config.moddedProjectileDrag)
         }
     }
 
@@ -259,12 +262,24 @@ class EntityCombatAnalyzer(private val config: GrimSaverConfig = GrimSaverConfig
         if (attacker.isPlayer && !config.pvpThreats) return null
         if (!attacker.isPlayer && !config.mobThreats) return null
         val intelligence = intelligence(attacker, snapshot)
+        if (attacker.isCreeper && (attacker.creeperSwelling || attacker.position.distanceTo(snapshot.player.position) <= 5.0)) {
+            return creeperExplosionRisk(attacker, snapshot.player, intelligence)
+        }
         if (!intelligence.isAggressive && intelligence.attackRangePressure <= 0.0 && !intelligence.fallingAttack) return null
         val prediction = meleeDamage(attacker, snapshot.player, intelligence)
         return CombatRisk(prediction.damage, intelligence.targetingScore, enchantmentRisk(attacker.mainHand), prediction.source, prediction.reason)
     }
 
     fun projectileDamage(projectile: ProjectileSnapshot, player: PlayerSnapshot): DamagePrediction = DamagePredictor.projectile(projectile, player)
+
+    private fun creeperExplosionRisk(creeper: LivingSnapshot, player: PlayerSnapshot, intelligence: EntityIntelligence): CombatRisk {
+        val distance = creeper.position.distanceTo(player.position)
+        val exposure = (1.0 - distance / 6.0).coerceIn(0.0, 1.0)
+        val raw = 36.0 * exposure * exposure + if (creeper.creeperSwelling) 8.0 else 0.0
+        val reduced = reduceWithArmorAndEnchantments(raw, player, DamageChannel.EXPLOSION)
+        val targeting = max(0.85, max(intelligence.targetingScore, if (creeper.creeperSwelling) 1.0 else 0.0))
+        return CombatRisk(reduced, targeting, 0.0, creeper.typeName, "RiskEngine creeper explosion pressure")
+    }
 
     fun fallRisk(player: PlayerSnapshot): CombatRisk {
         val prediction = fallDamage(player)
@@ -274,12 +289,17 @@ class EntityCombatAnalyzer(private val config: GrimSaverConfig = GrimSaverConfig
     fun meleeDamage(attacker: LivingSnapshot, player: PlayerSnapshot, intelligence: EntityIntelligence = EntityIntelligence.neutral()): DamagePrediction {
         val stack = attacker.mainHand
         var raw = max(attacker.attackDamage, itemAttackDamage(stack))
+        raw *= (0.2 + attacker.attackCooldown.coerceIn(0.0, 1.0).let { it * it * 0.8 })
         raw += stack.level(Enchantments.SHARPNESS).let { if (it > 0) 0.5 * it + 0.5 else 0.0 }
         raw += max(stack.level(Enchantments.SMITE), stack.level(Enchantments.BANE_OF_ARTHROPODS)) * 2.5
+        raw += attacker.activeEffects.firstOrNull { it.matches("strength") }?.let { 3.0 * (it.amplifier + 1) } ?: 0.0
+        raw -= attacker.activeEffects.firstOrNull { it.matches("weakness") }?.let { 4.0 * (it.amplifier + 1) } ?: 0.0
+        if (!attacker.isOnGround && attacker.fallDistance > 0.0f && attacker.velocity.y < -0.08) raw *= 1.5
+        if (attacker.isSprinting) raw += 1.0
         raw += stack.level(Enchantments.FIRE_ASPECT) * 2.0
         raw += customEnchantmentRisk(stack) * 1.5
-        if (intelligence.fallingAttack) raw += maceFallBonus(attacker, player, raw)
-        val reduced = reduceWithArmorAndEnchantments(raw, player, DamageChannel.MELEE)
+        if (intelligence.fallingAttack || stack.item == Items.MACE) raw += maceFallBonus(attacker, player, raw)
+        val reduced = reduceWithArmorAndEnchantments(raw.coerceAtLeast(0.0), player, DamageChannel.MELEE)
         val entityName = attacker.name.ifBlank { attacker.typeName }
         val source = if (attacker.isPlayer) entityName else attacker.typeName.substringAfterLast('.')
         val weapon = if (stack.isEmpty) "hands" else runCatching { stack.hoverName.string }.getOrDefault("unknown item")
@@ -357,6 +377,9 @@ class EntityCombatAnalyzer(private val config: GrimSaverConfig = GrimSaverConfig
                 customProtectionRisk(armor)
         }.coerceIn(0, 20)
         damage *= 1.0 - epf / 25.0
+        player.activeEffects.firstOrNull { it.matches("resistance") }?.let { resistance ->
+            damage *= 1.0 - ((resistance.amplifier + 1) * 0.2).coerceAtMost(0.8)
+        }
         return damage.coerceAtLeast(0.0)
     }
 
