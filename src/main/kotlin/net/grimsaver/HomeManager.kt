@@ -12,6 +12,8 @@ import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
 
@@ -21,6 +23,9 @@ class HomeManager(private val logger: LastStandLogger) {
     private val gson = GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create()
     private val threatCooldowns = ConcurrentHashMap<String, Long>()
     @Volatile private var lastGlobalTrigger = 0L
+    private val deleteExecutor = Executors.newSingleThreadScheduledExecutor { runnable ->
+        Thread(runnable, "GrimSaver-HomeLifecycle").apply { isDaemon = true }
+    }
 
     fun cooldownReady(threat: Threat): Boolean {
         val now = System.currentTimeMillis()
@@ -99,7 +104,8 @@ class HomeManager(private val logger: LastStandLogger) {
                     parsed.get("lastDeathNumber")?.let { runCatching { it.asInt }.getOrNull() } ?: 0,
                     homes.maxDeathNumber()
                 )
-                return HomeState(lastDeathNumber, homes, records)
+                val nextSlot = parsed.get("nextSlot")?.let { runCatching { it.asInt }.getOrNull() }?.coerceIn(1, 4) ?: ((lastDeathNumber % GrimSaverConfig.homeMaxSlots.coerceIn(1, 4)) + 1)
+                return HomeState(lastDeathNumber, nextSlot, homes.filter { slotNumber(it) in 1..GrimSaverConfig.homeMaxSlots.coerceIn(1, 4) }.toSet(), records.filter { slotNumber(it.name) in 1..GrimSaverConfig.homeMaxSlots.coerceIn(1, 4) })
             }.onFailure { throwable ->
                 warnGrimSaverFailure("homes-read-${file.fileName}", "Malformed GrimSaver home file; preserving it and starting with empty state", throwable)
             }
@@ -114,7 +120,7 @@ class HomeManager(private val logger: LastStandLogger) {
         return runCatching {
             val records = Files.readAllLines(legacyFile).mapNotNull(::parseLegacyRecord)
             val homes = records.map { it.name }.toMutableSet()
-            HomeState(homes.maxDeathNumber(), homes, records)
+            HomeState(homes.maxDeathNumber(), ((homes.maxDeathNumber() % GrimSaverConfig.homeMaxSlots.coerceIn(1, 4)) + 1), homes, records)
         }.getOrElse { throwable ->
             warnGrimSaverFailure("legacy-homes-read-${legacyFile.fileName}", "Unable to read legacy GrimSaver home file; ignoring legacy state", throwable)
             HomeState()
@@ -122,9 +128,52 @@ class HomeManager(private val logger: LastStandLogger) {
     }
 
     private fun nextDeathNumber(state: HomeState): Int {
-        var candidate = state.lastDeathNumber + 1
-        while ("death$candidate" in state.homes) candidate++
-        return candidate
+        val maxSlots = GrimSaverConfig.homeMaxSlots.coerceIn(1, 4)
+        if (GrimSaverConfig.homeUseMaxSlot) return maxSlots
+        val next = (state.nextSlot.takeIf { it in 1..maxSlots } ?: 1)
+        return next
+    }
+
+    fun observeHomeCommand(client: Minecraft, command: String) {
+        val trimmed = command.trim().removePrefix("/")
+        val parts = trimmed.split(Regex("\\s+"))
+        if (parts.size < 2 || !parts[0].equals("home", ignoreCase = true)) return
+        val home = normalizeHomeName(parts[1]) ?: return
+        scheduleDelete(client, home)
+    }
+
+    private fun normalizeHomeName(token: String): String? {
+        val numeric = token.toIntOrNull()?.takeIf { it in 1..4 }?.let { "death$it" }
+        val named = token.takeIf { DEATH_NAME.matches(it) }
+        return numeric ?: named
+    }
+
+    private fun scheduleDelete(client: Minecraft, homeName: String) {
+        if (!GrimSaverConfig.homeAutoDelete) return
+        val delay = GrimSaverConfig.homeDeleteDelayMillis.coerceAtLeast(0L)
+        deleteExecutor.schedule({
+            client.execute {
+                runCatching {
+                    client.player?.connection?.sendCommand("delhome $homeName")
+                    markHomeDeleted(client, homeName)
+                    debugGrimSaver("Deleted GrimSaver home {} after lifecycle delay {}ms", homeName, delay)
+                }.onFailure { throwable ->
+                    warnGrimSaverFailure("home-auto-delete", "Unable to auto-delete GrimSaver home $homeName", throwable)
+                }
+            }
+        }, delay, TimeUnit.MILLISECONDS)
+    }
+
+    @Synchronized
+    private fun markHomeDeleted(client: Minecraft, homeName: String) {
+        val serverKey = client.currentServer?.ip ?: "singleplayer"
+        val file = fileForServer(serverKey)
+        val state = readState(file, serverKey)
+        writeState(file, state.withoutHome(homeName))
+    }
+
+    fun shutdown() {
+        deleteExecutor.shutdownNow()
     }
 
     private fun writeState(file: Path, state: HomeState) {
@@ -172,13 +221,26 @@ class HomeManager(private val logger: LastStandLogger) {
     }
 
     private fun HomeState.withHome(home: SavedHome, deathNumber: Int): HomeState {
-        val newHomes = homes.toMutableSet()
+        val maxSlots = GrimSaverConfig.homeMaxSlots.coerceIn(1, 4)
+        val newHomes = homes.filterTo(mutableSetOf()) { it != home.name && slotNumber(it) in 1..maxSlots }
         newHomes += home.name
-        val newRecords = records + home.toRecord()
-        return copy(lastDeathNumber = maxOf(lastDeathNumber, deathNumber), homes = newHomes, records = newRecords)
+        val newRecords = records.filter { it.name != home.name && slotNumber(it.name) in 1..maxSlots } + home.toRecord()
+        val next = if (GrimSaverConfig.homeUseMaxSlot) maxSlots else (deathNumber % maxSlots) + 1
+        return copy(lastDeathNumber = deathNumber, nextSlot = next, homes = newHomes, records = newRecords)
     }
 
-    private fun HomeState.toDto(): HomeStateDto = HomeStateDto(lastDeathNumber, homes.sortedWith(DEATH_NAME_COMPARATOR), records)
+    private fun HomeState.withoutHome(homeName: String): HomeState {
+        val released = slotNumber(homeName).takeIf { it in 1..GrimSaverConfig.homeMaxSlots.coerceIn(1, 4) }
+        return copy(
+            nextSlot = if (!GrimSaverConfig.homeUseMaxSlot && released != null) released else nextSlot,
+            homes = homes - homeName,
+            records = records.filterNot { it.name == homeName }
+        )
+    }
+
+    private fun slotNumber(name: String): Int = DEATH_NAME.matchEntire(name)?.groupValues?.get(1)?.toIntOrNull() ?: Int.MAX_VALUE
+
+    private fun HomeState.toDto(): HomeStateDto = HomeStateDto(lastDeathNumber, nextSlot, homes.sortedWith(DEATH_NAME_COMPARATOR), records)
 
     private fun SavedHome.toRecord(): SavedHomeRecord = SavedHomeRecord(
         name = name,
@@ -225,12 +287,14 @@ class HomeManager(private val logger: LastStandLogger) {
 
     private data class HomeState(
         val lastDeathNumber: Int = 0,
+        val nextSlot: Int = 1,
         val homes: Set<String> = emptySet(),
         val records: List<SavedHomeRecord> = emptyList()
     )
 
     private data class HomeStateDto(
         val lastDeathNumber: Int,
+        val nextSlot: Int,
         val homes: List<String>,
         val records: List<SavedHomeRecord>
     )
