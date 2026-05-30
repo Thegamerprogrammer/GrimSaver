@@ -58,8 +58,12 @@ fun warnGrimSaverFailure(key: String, message: String, throwable: Throwable) {
     warnOnce(entityFailureWarnings, "$key|${throwable.javaClass.name}", message, throwable)
 }
 
+fun infoGrimSaver(message: String, vararg args: Any?) {
+    if (safeWarnLoggingEnabled()) entitySafetyLogger.info(message, *args)
+}
+
 fun debugGrimSaver(message: String, vararg args: Any?) {
-    if (GrimSaverConfig.debugLoggingEnabled()) entitySafetyLogger.debug(message, *args)
+    if (safeDebugLoggingEnabled()) entitySafetyLogger.debug(message, *args)
 }
 
 private fun AttributeInstance.safeValue(entity: LivingEntity, attributeName: String, default: Double): Double = try {
@@ -84,5 +88,17 @@ private fun Holder<Attribute>.safeAttributeName(): String = runCatching {
 }
 
 private fun warnOnce(keys: MutableSet<String>, key: String, message: String, vararg args: Any?) {
-    if (GrimSaverConfig.warnLoggingEnabled() && keys.add(key)) entitySafetyLogger.warn(message, *args)
+    if (safeWarnLoggingEnabled() && keys.add(key)) entitySafetyLogger.warn(message, *args)
+}
+
+private fun safeWarnLoggingEnabled(): Boolean = try {
+    GrimSaverConfig.warnLoggingEnabled()
+} catch (_: Throwable) {
+    true
+}
+
+private fun safeDebugLoggingEnabled(): Boolean = try {
+    GrimSaverConfig.debugLoggingEnabled()
+} catch (_: Throwable) {
+    false
 }
