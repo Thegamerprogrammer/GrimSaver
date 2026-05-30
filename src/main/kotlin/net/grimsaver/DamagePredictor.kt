@@ -37,23 +37,31 @@ object DamagePredictor {
         return DamagePrediction(
             damage = reduced,
             reason = projectileReason(projectile, shooterWeapon, projectileStack),
-            source = projectile.ownerName ?: projectile.typeName
+            source = projectile.ownerName ?: projectile.typeName,
+            confidence = projectile.dataConfidence
         )
     }
 
     fun melee(attacker: LivingSnapshot, player: PlayerSnapshot): DamagePrediction {
         val stack = attacker.mainHand
         var raw = max(attacker.attackDamage, itemAttackDamage(stack))
+        raw *= (0.2 + attacker.attackCooldown.coerceIn(0.0, 1.0).let { it * it * 0.8 })
         raw += stack.level(Enchantments.SHARPNESS).let { if (it > 0) 0.5 * it + 0.5 else 0.0 }
         raw += max(stack.level(Enchantments.SMITE), stack.level(Enchantments.BANE_OF_ARTHROPODS)) * 2.5
+        raw += strengthBonus(attacker)
+        raw -= weaknessPenalty(attacker)
+        if (!attacker.isOnGround && attacker.fallDistance > 0.0f && attacker.velocity.y < -0.08) raw *= 1.5
+        if (attacker.isSprinting) raw += 1.0
+        if (stack.item == Items.MACE) raw += maceSmashBonus(attacker)
         raw += stack.level(Enchantments.FIRE_ASPECT) * 2.0
         raw += attacker.armorStacks.sumOf { it.level(Enchantments.THORNS) * 0.5 }
+        raw = raw.coerceAtLeast(0.0)
 
         val reduced = reduceWithArmorAndEnchantments(raw, player, projectile = false, explosion = false)
         val entityName = attacker.name.ifBlank { attacker.typeName }
         val source = if (attacker.isPlayer) entityName else attacker.typeName.substringAfterLast('.')
         val weapon = if (stack.isEmpty) "hands" else stack.displayNameForReason()
-        return DamagePrediction(reduced, "${if (attacker.isPlayer) "Melee Player" else "Melee ${source.replaceFirstChar { it.titlecase() }}"} with $weapon", entityName)
+        return DamagePrediction(reduced, "${if (attacker.isPlayer) "Melee Player" else "Melee ${source.replaceFirstChar { it.titlecase() }}"} with $weapon", entityName, confidence = if (attacker.activeEffects.isNotEmpty()) 0.9 else 0.78)
     }
 
     fun fall(player: PlayerSnapshot): DamagePrediction {
@@ -62,30 +70,31 @@ object DamagePredictor {
         val raw = max(0.0, ceil(predictedDistance - player.safeFallDistance) * player.fallDamageMultiplier)
         if (raw <= 0.0) return DamagePrediction(0.0, "Fall Damage", "fall")
         val reduced = reduceFall(raw, player)
-        return DamagePrediction(reduced, "Fall Damage", "fall")
+        return DamagePrediction(reduced, "Fall Damage", "fall", confidence = 0.8)
     }
 
     private fun arrowDamage(projectile: ProjectileSnapshot, shooterWeapon: ItemStack?): Double {
         // Vanilla arrow damage starts from velocity * base damage. We do not have the server's exact baseDamage field
         // client-side, so this original predictor uses speed, critical state and full shooter/projectile components.
-        var damage = max(2.0, projectile.velocity.length() * 2.0)
-        damage += shooterWeapon.level(Enchantments.POWER) * 0.5 + if (shooterWeapon.level(Enchantments.POWER) > 0) 0.5 else 0.0
-        if (projectile.critical) damage += 1.5
-        if (shooterWeapon.level(Enchantments.MULTISHOT) > 0) damage += 0.75
-        damage += potionDamage(projectile.projectileStack) * 0.75
+        val base = projectile.baseDamage ?: 2.0
+        val speed = projectile.velocity.length().coerceIn(0.0, 3.5)
+        var damage = ceil(speed * base).coerceAtLeast(base)
+        val power = shooterWeapon.level(Enchantments.POWER)
+        if (power > 0) damage += power * 0.5 + 0.5
+        if (projectile.critical) damage *= 1.25
+        damage += potionDamage(projectile.projectileStack, immediateOnly = true)
         return damage
     }
 
-    private fun potionDamage(stack: ItemStack): Double {
+    private fun potionDamage(stack: ItemStack, immediateOnly: Boolean = false): Double {
         return runCatching {
             val contents = stack[DataComponents.POTION_CONTENTS] ?: return 0.0
             var damage = 0.0
             for (effect in contents.allEffects) {
                 when {
                     effect.`is`(MobEffects.INSTANT_DAMAGE) -> damage += 6.0 * (effect.amplifier + 1)
-                    effect.`is`(MobEffects.POISON) -> damage += min(8.0, 2.0 + effect.amplifier * 2.0)
-                    effect.`is`(MobEffects.WITHER) -> damage += min(12.0, 4.0 + effect.amplifier * 3.0)
-                    effect.`is`(MobEffects.WEAKNESS) -> damage += 1.0
+                    effect.`is`(MobEffects.POISON) && !immediateOnly -> damage += min(8.0, (effect.duration / 25.0) * (effect.amplifier + 1))
+                    effect.`is`(MobEffects.WITHER) && !immediateOnly -> damage += min(12.0, (effect.duration / 20.0) * (effect.amplifier + 1))
                 }
             }
             damage
@@ -122,6 +131,27 @@ object DamagePredictor {
         }
     }
 
+
+    private fun strengthBonus(attacker: LivingSnapshot): Double = attacker.activeEffects
+        .firstOrNull { it.matches("strength") }
+        ?.let { 3.0 * (it.amplifier + 1) }
+        ?: 0.0
+
+    private fun weaknessPenalty(attacker: LivingSnapshot): Double = attacker.activeEffects
+        .firstOrNull { it.matches("weakness") }
+        ?.let { 4.0 * (it.amplifier + 1) }
+        ?: 0.0
+
+    private fun maceSmashBonus(attacker: LivingSnapshot): Double {
+        if (attacker.fallDistance <= 1.5f || attacker.velocity.y >= -0.08) return 0.0
+        return attacker.fallDistance.toDouble() * 1.5 + (-attacker.velocity.y * 2.0)
+    }
+
+    private fun applyResistance(damage: Double, player: PlayerSnapshot): Double {
+        val resistance = player.activeEffects.firstOrNull { it.matches("resistance") } ?: return damage
+        return damage * (1.0 - ((resistance.amplifier + 1) * 0.2).coerceAtMost(0.8))
+    }
+
     private fun reduceWithArmorAndEnchantments(raw: Double, player: PlayerSnapshot, projectile: Boolean, explosion: Boolean): Double {
         val afterArmor = vanillaArmorReduction(raw, player.armor, player.armorToughness)
         val epf = player.armorStacks.sumOf { armor ->
@@ -129,14 +159,14 @@ object DamagePredictor {
                 (if (projectile) armor.level(Enchantments.PROJECTILE_PROTECTION) * 2 else 0) +
                 (if (explosion) armor.level(Enchantments.BLAST_PROTECTION) * 2 else 0)
         }.coerceIn(0, 20)
-        return afterArmor * (1.0 - epf / 25.0)
+        return applyResistance(afterArmor * (1.0 - epf / 25.0), player)
     }
 
     private fun reduceFall(raw: Double, player: PlayerSnapshot): Double {
         val epf = player.armorStacks.sumOf { armor ->
             armor.level(Enchantments.PROTECTION) + armor.level(Enchantments.FEATHER_FALLING) * 3
         }.coerceIn(0, 20)
-        return raw * (1.0 - epf / 25.0)
+        return applyResistance(raw * (1.0 - epf / 25.0), player)
     }
 
     private fun vanillaArmorReduction(damage: Double, armor: Double, toughness: Double): Double {

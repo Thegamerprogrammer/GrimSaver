@@ -23,6 +23,7 @@ object GrimSaverClient : ClientModInitializer {
     internal lateinit var homeManager: HomeManager
     private lateinit var chatManager: ChatManager
     private lateinit var threatDetector: ThreatDetector
+    private lateinit var riskEngine: RiskEngine
     private val emergencyDetector = EmergencyDetector()
     private val triggerGate = ThreatTriggerGate()
 
@@ -32,6 +33,7 @@ object GrimSaverClient : ClientModInitializer {
         homeManager = HomeManager(lastStandLogger)
         chatManager = ChatManager(homeManager).also { it.register() }
         threatDetector = ThreatDetector(homeManager)
+        riskEngine = RiskEngine(GrimSaverConfig)
 
         ClientTickEvents.END_CLIENT_TICK.register(ClientTickEvents.EndTick { client -> onClientTick(client) })
         ClientLifecycleEvents.CLIENT_STOPPING.register(ClientLifecycleEvents.ClientStopping { shutdown() })
@@ -64,8 +66,27 @@ object GrimSaverClient : ClientModInitializer {
 
         executor.execute {
             try {
-                threatDetector.detect(snapshot)?.let { threat ->
-                    client.execute { triggerThreat(client, threat) }
+                if (GrimSaverConfig.riskEngineEnabled) {
+                    val assessment = riskEngine.assess(snapshot)
+                    if (GrimSaverConfig.riskDebug) {
+                        debugGrimSaver(
+                            "RiskEngine assessment risk={} confidence={} burst={} predictedDamage={} velocity={} source={} trigger={}",
+                            assessment.totalRiskScore,
+                            assessment.confidence,
+                            assessment.burstLevel,
+                            assessment.predictedDamage,
+                            assessment.healthVelocity,
+                            assessment.primaryThreatSource,
+                            assessment.shouldTriggerSetHome
+                        )
+                    }
+                    if (assessment.shouldTriggerSetHome && assessment.confidence >= GrimSaverConfig.lethalConfidenceThreshold && assessment.healthVelocity <= -GrimSaverConfig.burstVelocityThreshold) {
+                        client.execute { triggerThreat(client, assessment.toThreat(snapshot)) }
+                    }
+                } else {
+                    threatDetector.detect(snapshot)?.let { threat ->
+                        client.execute { triggerThreat(client, threat) }
+                    }
                 }
             } catch (throwable: Throwable) {
                 logger.warn("Threat scan failed", throwable)
@@ -88,6 +109,7 @@ object GrimSaverClient : ClientModInitializer {
     }
 
     private fun shutdown() {
+        homeManager.shutdown()
         executor.shutdownNow()
         executor.awaitTermination(250, TimeUnit.MILLISECONDS)
     }

@@ -3,6 +3,7 @@ package net.grimsaver
 import net.minecraft.client.Minecraft
 import net.minecraft.client.multiplayer.ClientLevel
 import net.minecraft.client.player.LocalPlayer
+import net.minecraft.core.component.DataComponents
 import net.minecraft.world.entity.Entity
 import net.minecraft.world.entity.EquipmentSlot
 import net.minecraft.world.entity.LivingEntity
@@ -62,7 +63,10 @@ object SnapshotFactory {
                 fallDistance = player.fallDistance.toFloat(),
                 safeFallDistance = player.safeAttribute(Attributes.SAFE_FALL_DISTANCE, 3.0),
                 fallDamageMultiplier = player.safeAttribute(Attributes.FALL_DAMAGE_MULTIPLIER, 1.0),
-                onGround = player.onGround()
+                onGround = player.onGround(),
+                activeEffects = activeEffectSnapshots(player),
+                fireImmune = runCatching { player.fireImmune() }.getOrDefault(false),
+                regenerationPerSecond = regenerationRate(activeEffectSnapshots(player))
             ),
             projectiles = projectiles,
             livingEntities = livingEntities
@@ -91,7 +95,15 @@ object SnapshotFactory {
             ownerName = owner?.displayName?.string,
             critical = arrow?.isCritArrow ?: false,
             onFire = isOnFire,
-            inGround = arrow?.isNoPhysics ?: noPhysics
+            inGround = arrow?.isNoPhysics ?: noPhysics,
+            ownerId = owner?.id,
+            ageTicks = runCatching { tickCount }.getOrDefault(0),
+            pickupStatus = arrow?.reflectInt("pickup", "pickupStatus") ?: -1,
+            pierceLevel = arrow?.reflectInt("pierceLevel") ?: 0,
+            potionEffects = potionEffectSnapshots(itemStackSnapshot(arrow)),
+            gravity = projectileGravity(),
+            baseDamage = arrow?.reflectDouble("baseDamage"),
+            dataConfidence = if (arrow?.reflectDouble("baseDamage") != null) 0.92 else 0.68
         )
     }.getOrElse { throwable ->
         warnEntitySnapshotFailure(safeEntityType(), id, "projectile", throwable)
@@ -122,7 +134,12 @@ object SnapshotFactory {
             isCreeper = creeper != null,
             creeperSwelling = creeper?.isActuallySwelling() ?: false,
             targetId = runCatching { mob?.target?.id }.getOrNull()?.takeIf { it == playerId },
-            attackRange = safeAttribute(Attributes.ENTITY_INTERACTION_RANGE, 3.0).coerceAtLeast(3.0)
+            attackRange = safeAttribute(Attributes.ENTITY_INTERACTION_RANGE, 3.0).coerceAtLeast(3.0),
+            attackCooldown = (this as? Player)?.let { runCatching { it.getAttackStrengthScale(0.0f).toDouble() }.getOrDefault(1.0) } ?: 1.0,
+            isSprinting = runCatching { isSprinting }.getOrDefault(false),
+            fallDistance = runCatching { fallDistance.toFloat() }.getOrDefault(0.0f),
+            isOnGround = runCatching { onGround() }.getOrDefault(true),
+            activeEffects = activeEffectSnapshots(this)
         )
     }.getOrElse { throwable ->
         warnEntitySnapshotFailure(safeEntityType(), id, "living", throwable)
@@ -140,6 +157,77 @@ object SnapshotFactory {
             else -> ItemStack.EMPTY
         }
     }.getOrDefault(ItemStack.EMPTY)
+
+
+    private fun activeEffectSnapshots(entity: LivingEntity): List<ActiveEffectSnapshot> = runCatching {
+        entity.activeEffects.map { effect ->
+            ActiveEffectSnapshot(
+                id = runCatching { effect.effect.value().descriptionId }.getOrElse { effect.effect.toString() },
+                amplifier = effect.amplifier,
+                durationTicks = effect.duration,
+                ambient = runCatching { effect.isAmbient }.getOrDefault(false),
+                visible = runCatching { effect.isVisible }.getOrDefault(true)
+            )
+        }
+    }.getOrDefault(emptyList())
+
+    private fun potionEffectSnapshots(stack: ItemStack): List<ActiveEffectSnapshot> = runCatching {
+        stack[DataComponents.POTION_CONTENTS]?.allEffects?.map { effect ->
+            ActiveEffectSnapshot(
+                id = runCatching { effect.effect.value().descriptionId }.getOrElse { effect.effect.toString() },
+                amplifier = effect.amplifier,
+                durationTicks = effect.duration,
+                ambient = runCatching { effect.isAmbient }.getOrDefault(false),
+                visible = runCatching { effect.isVisible }.getOrDefault(true)
+            )
+        } ?: emptyList()
+    }.getOrDefault(emptyList())
+
+    private fun regenerationRate(effects: List<ActiveEffectSnapshot>): Double {
+        val regeneration = effects.firstOrNull { it.matches("regeneration") } ?: return 0.0
+        val intervalTicks = (50 shr regeneration.amplifier).coerceAtLeast(1)
+        return 1.0 / (intervalTicks * 0.05)
+    }
+
+    private fun Projectile.projectileGravity(): Double {
+        val type = type.descriptionId.lowercase()
+        return when {
+            "arrow" in type || "trident" in type || "potion" in type -> 0.05
+            "firework" in type || "fireball" in type || "wind_charge" in type -> 0.0
+            else -> GrimSaverConfig.moddedProjectileGravity
+        }
+    }
+
+    private fun Any.reflectInt(vararg names: String): Int? = names.firstNotNullOfOrNull { name ->
+        runCatching {
+            javaClass.findField(name)?.let { field ->
+                field.isAccessible = true
+                when (val value = field.get(this)) {
+                    is Number -> value.toInt()
+                    is Enum<*> -> value.ordinal
+                    else -> null
+                }
+            }
+        }.getOrNull()
+    }
+
+    private fun Any.reflectDouble(vararg names: String): Double? = names.firstNotNullOfOrNull { name ->
+        runCatching {
+            javaClass.findField(name)?.let { field ->
+                field.isAccessible = true
+                (field.get(this) as? Number)?.toDouble()
+            }
+        }.getOrNull()
+    }
+
+    private fun Class<*>.findField(name: String): java.lang.reflect.Field? {
+        var current: Class<*>? = this
+        while (current != null) {
+            current.declaredFields.firstOrNull { it.name.equals(name, ignoreCase = true) }?.let { return it }
+            current = current.superclass
+        }
+        return null
+    }
 
     private fun armorCopies(entity: LivingEntity): List<ItemStack> = listOf(
         EquipmentSlot.FEET,

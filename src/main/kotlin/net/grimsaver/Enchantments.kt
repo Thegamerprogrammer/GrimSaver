@@ -17,30 +17,22 @@ object EnchantmentLevels {
         return runCatching { EnchantmentHelper.getItemEnchantmentLevel(holder, this) }.getOrDefault(0)
     }
 
-    fun ItemStack?.hasComponentNbt(): Boolean {
+    fun ItemStack?.hasComponentNbt(): Boolean = hasCombatRelevantComponents()
+
+    fun ItemStack?.hasCombatRelevantComponents(): Boolean {
         if (this == null || this.isEmpty) return false
         return runCatching {
-            this[DataComponents.CUSTOM_DATA] != null || this[DataComponents.ENCHANTMENTS] != null ||
-                this[DataComponents.STORED_ENCHANTMENTS] != null || this[DataComponents.POTION_CONTENTS] != null ||
-                this[DataComponents.FIREWORKS] != null
+            this[DataComponents.CUSTOM_DATA] != null || this[DataComponents.ATTRIBUTE_MODIFIERS] != null ||
+                this[DataComponents.ENCHANTMENTS] != null || this[DataComponents.STORED_ENCHANTMENTS] != null ||
+                this[DataComponents.POTION_CONTENTS] != null || this[DataComponents.FIREWORKS] != null
         }.getOrDefault(false)
     }
 
     fun ItemStack?.describeCombatEnchantments(): String {
         if (this == null || this.isEmpty) return ""
-        val parts = mutableListOf<String>()
-        addIfPresent(parts, "Power", level(Enchantments.POWER))
-        addIfPresent(parts, "Punch", level(Enchantments.PUNCH))
-        addIfPresent(parts, "Flame", level(Enchantments.FLAME))
-        addIfPresent(parts, "Multishot", level(Enchantments.MULTISHOT))
-        addIfPresent(parts, "Piercing", level(Enchantments.PIERCING))
-        addIfPresent(parts, "Sharpness", level(Enchantments.SHARPNESS))
-        addIfPresent(parts, "Smite", level(Enchantments.SMITE))
-        addIfPresent(parts, "Bane", level(Enchantments.BANE_OF_ARTHROPODS))
-        addIfPresent(parts, "Fire Aspect", level(Enchantments.FIRE_ASPECT))
-        addIfPresent(parts, "Knockback", level(Enchantments.KNOCKBACK))
-        addIfPresent(parts, "Impaling", level(Enchantments.IMPALING))
-        return parts.joinToString(" ")
+        return COMBAT_ENCHANTMENTS.mapNotNull { (label, enchantment) ->
+            level(enchantment).takeIf { it > 0 }?.let { "$label ${roman(it)}" }
+        }.joinToString(" ")
     }
 
     fun ItemStack?.displayNameForReason(): String {
@@ -50,18 +42,33 @@ object EnchantmentLevels {
         return if (enchants.isBlank()) itemName else "$enchants $itemName"
     }
 
-    private fun addIfPresent(parts: MutableList<String>, label: String, level: Int) {
-        if (level > 0) parts += "$label ${roman(level)}"
-    }
-
     private fun roman(level: Int): String = when (level) {
         1 -> "I"
         2 -> "II"
         3 -> "III"
         4 -> "IV"
         5 -> "V"
+        6 -> "VI"
+        7 -> "VII"
+        8 -> "VIII"
+        9 -> "IX"
+        10 -> "X"
         else -> level.toString()
     }
+
+    private val COMBAT_ENCHANTMENTS = listOf(
+        "Power" to Enchantments.POWER,
+        "Punch" to Enchantments.PUNCH,
+        "Flame" to Enchantments.FLAME,
+        "Multishot" to Enchantments.MULTISHOT,
+        "Piercing" to Enchantments.PIERCING,
+        "Sharpness" to Enchantments.SHARPNESS,
+        "Smite" to Enchantments.SMITE,
+        "Bane" to Enchantments.BANE_OF_ARTHROPODS,
+        "Fire Aspect" to Enchantments.FIRE_ASPECT,
+        "Knockback" to Enchantments.KNOCKBACK,
+        "Impaling" to Enchantments.IMPALING
+    )
 
     private fun ResourceKey<Enchantment>.holder(): Holder<Enchantment>? =
         MinecraftAccess.level?.registryAccess()
