@@ -98,7 +98,7 @@ object GrimSaverClient : ClientModInitializer {
                                 assessment.shouldTriggerSetHome
                             )
                         }
-                        if (assessment.shouldTriggerSetHome && assessment.confidence >= GrimSaverConfig.lethalConfidenceThreshold && assessment.healthVelocity <= -GrimSaverConfig.burstVelocityThreshold) {
+                        if (assessment.shouldTriggerSetHome && assessment.confidence >= GrimSaverConfig.lethalConfidenceThreshold) {
                             client.execute { triggerThreat(client, assessment.toThreat(snapshot)) }
                         }
                     } else {
