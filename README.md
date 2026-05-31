@@ -16,16 +16,6 @@ Unlike traditional damage-threshold systems, GrimSaver performs probabilistic su
 
 ✅ No Renderer
 
-✅ No MCEF
-
-✅ No Chromium
-
-✅ No DJL
-
-✅ No PyTorch
-
-✅ No Server Plugins Required
-
 ✅ Multi-Threaded Threat Analysis
 
 ✅ False Positive Recovery System
@@ -37,6 +27,10 @@ Unlike traditional damage-threshold systems, GrimSaver performs probabilistic su
 ✅ Projectile Trajectory Prediction
 
 ✅ Environmental Hazard Forecasting
+
+✅ Requires any /home server plugin/mod
+
+✅ Made specifically for SMP's
 
 ---
 
