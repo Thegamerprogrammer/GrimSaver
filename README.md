@@ -383,8 +383,8 @@ Position: 124 63 -812
 Commands are intercepted client-side and never sent to the server.
 
 ```text
-.grimsaver
-.gs
+*grimsaver
+*gs
 ```
 
 Displays recently saved homes for the current server.
