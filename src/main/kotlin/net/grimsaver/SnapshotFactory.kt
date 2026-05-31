@@ -3,6 +3,7 @@ package net.grimsaver
 import net.minecraft.client.Minecraft
 import net.minecraft.client.multiplayer.ClientLevel
 import net.minecraft.client.player.LocalPlayer
+import net.minecraft.core.BlockPos
 import net.minecraft.core.component.DataComponents
 import net.minecraft.world.entity.Entity
 import net.minecraft.world.entity.EquipmentSlot
@@ -15,7 +16,9 @@ import net.minecraft.world.entity.player.Player
 import net.minecraft.world.entity.projectile.ItemSupplier
 import net.minecraft.world.entity.projectile.Projectile
 import net.minecraft.world.entity.projectile.arrow.AbstractArrow
+import net.minecraft.world.item.BlockItem
 import net.minecraft.world.item.ItemStack
+import net.minecraft.world.item.Items
 import java.util.ArrayList
 
 object SnapshotFactory {
@@ -66,10 +69,74 @@ object SnapshotFactory {
                 onGround = player.onGround(),
                 activeEffects = activeEffectSnapshots(player),
                 fireImmune = runCatching { player.fireImmune() }.getOrDefault(false),
-                regenerationPerSecond = regenerationRate(activeEffectSnapshots(player))
+                regenerationPerSecond = regenerationRate(activeEffectSnapshots(player)),
+                inventory = inventorySnapshot(player)
             ),
             projectiles = projectiles,
-            livingEntities = livingEntities
+            livingEntities = livingEntities,
+            terrain = terrainSnapshot(level, playerPosition)
+        )
+    }
+
+    private fun inventorySnapshot(player: LocalPlayer): InventorySnapshot {
+        val main = runCatching { player.mainHandItem.copy() }.getOrDefault(ItemStack.EMPTY)
+        val offhand = runCatching { player.offhandItem.copy() }.getOrDefault(ItemStack.EMPTY)
+        val carried = (0 until runCatching { player.inventory.containerSize }.getOrDefault(0)).mapNotNull { slot ->
+            runCatching { player.inventory.getItem(slot).copy() }.getOrNull()
+        }
+        val placeable = carried.sumOf { stack ->
+            if (!stack.isEmpty && stack.item is BlockItem) stack.count else 0
+        }
+        return InventorySnapshot(
+            hasOffhandTotem = offhand.item == Items.TOTEM_OF_UNDYING,
+            hasMainHandTotem = main.item == Items.TOTEM_OF_UNDYING,
+            placeableBlockCount = placeable
+        )
+    }
+
+    private fun terrainSnapshot(level: ClientLevel, playerPosition: net.minecraft.world.phys.Vec3): TerrainSnapshot {
+        val origin = BlockPos.containing(playerPosition)
+        val directions = listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1, 1 to 1, 1 to -1, -1 to 1, -1 to -1)
+        var openRoutes = 0
+        var blocked = 0
+        var losBreaks = 0
+        var water = false
+        var lava = false
+        var climbable = false
+        var corridorLike = false
+        var hazards = 0
+        var sampled = 0
+
+        for ((dx, dz) in directions) {
+            var clearRun = 0
+            var sawWall = false
+            for (step in 1..8) {
+                val feet = origin.offset(dx * step, 0, dz * step)
+                val head = feet.above()
+                sampled++
+                val feetState = runCatching { level.getBlockState(feet) }.getOrNull() ?: continue
+                val headState = runCatching { level.getBlockState(head) }.getOrNull() ?: continue
+                val belowState = runCatching { level.getBlockState(feet.below()) }.getOrNull()
+                val passable = (feetState.isAir || !feetState.fluidState.isEmpty) && (headState.isAir || !headState.fluidState.isEmpty)
+                if (passable) clearRun++ else sawWall = true
+                water = water || feetState.fluidState.isSource && feetState.fluidState.type.toString().contains("water", true)
+                lava = lava || feetState.fluidState.type.toString().contains("lava", true)
+                if (lava) hazards++
+                if (belowState != null && !belowState.isAir && step <= 3) climbable = true
+            }
+            if (clearRun >= 5) openRoutes++ else blocked++
+            if (sawWall) losBreaks++
+        }
+        corridorLike = blocked >= 5 && openRoutes in 1..3
+        return TerrainSnapshot(
+            openEscapeDirections = openRoutes,
+            blockedDirections = blocked,
+            waterNearby = water,
+            lavaNearby = lava,
+            climbableTerrainNearby = climbable,
+            doorwayOrCorridorNearby = corridorLike,
+            lineOfSightBreaksNearby = losBreaks,
+            hazardDensity = if (sampled == 0) 0.0 else hazards.toDouble() / sampled.toDouble()
         )
     }
 

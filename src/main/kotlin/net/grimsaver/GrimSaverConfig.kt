@@ -71,6 +71,12 @@ object GrimSaverConfig {
     var moddedProjectileDrag = 0.99
     var healthForecastTicks = 80
     var threatCorrelationWindowTicks = 20
+    var survivalSimulationTicks = 120
+    var survivalSimulationBranches = 384
+    var deathProbabilityThreshold = 0.93
+    var escapeProbabilityTriggerCeiling = 0.35
+    var survivalHealthThreshold = 1.0
+    var pendingHomeMonitorMillis = 10_000L
 
     @Deprecated("Use pvpThreats and mobThreats for more precise control.")
     var meleeThreats: Boolean
@@ -154,6 +160,12 @@ object GrimSaverConfig {
             moddedProjectileDrag = json.double("moddedProjectileDrag", moddedProjectileDrag).coerceIn(0.5, 1.1)
             healthForecastTicks = json.int("healthForecastTicks", healthForecastTicks).coerceIn(20, 200)
             threatCorrelationWindowTicks = json.int("threatCorrelationWindowTicks", threatCorrelationWindowTicks).coerceIn(1, 80)
+            survivalSimulationTicks = json.int("survivalSimulationTicks", survivalSimulationTicks).coerceIn(20, 200)
+            survivalSimulationBranches = json.int("survivalSimulationBranches", survivalSimulationBranches).coerceIn(64, 2048)
+            deathProbabilityThreshold = json.double("deathProbabilityThreshold", deathProbabilityThreshold).coerceIn(0.50, 1.0)
+            escapeProbabilityTriggerCeiling = json.double("escapeProbabilityTriggerCeiling", escapeProbabilityTriggerCeiling).coerceIn(0.0, 1.0)
+            survivalHealthThreshold = json.double("survivalHealthThreshold", survivalHealthThreshold).coerceIn(0.0, 6.0)
+            pendingHomeMonitorMillis = json.long("pendingHomeMonitorMillis", pendingHomeMonitorMillis).coerceIn(1_000L, 60_000L)
             save()
         }.onFailure { throwable ->
             warnGrimSaverFailure("config-load", "Unable to load GrimSaver config; using in-memory defaults", throwable)
@@ -222,6 +234,12 @@ object GrimSaverConfig {
             moddedProjectileDrag = moddedProjectileDrag,
             healthForecastTicks = healthForecastTicks,
             threatCorrelationWindowTicks = threatCorrelationWindowTicks,
+            survivalSimulationTicks = survivalSimulationTicks,
+            survivalSimulationBranches = survivalSimulationBranches,
+            deathProbabilityThreshold = deathProbabilityThreshold,
+            escapeProbabilityTriggerCeiling = escapeProbabilityTriggerCeiling,
+            survivalHealthThreshold = survivalHealthThreshold,
+            pendingHomeMonitorMillis = pendingHomeMonitorMillis,
         )
         Files.newBufferedWriter(path).use { gson.toJson(dto, it) }
     }
@@ -273,6 +291,11 @@ object GrimSaverConfig {
         homeDeleteDelayMillis = props.long("homeDeleteDelayMillis", homeDeleteDelayMillis)
         healthForecastTicks = props.int("healthForecastTicks", healthForecastTicks).coerceIn(20, 200)
         threatCorrelationWindowTicks = props.int("threatCorrelationWindowTicks", threatCorrelationWindowTicks).coerceIn(1, 80)
+        survivalSimulationTicks = props.int("survivalSimulationTicks", survivalSimulationTicks).coerceIn(20, 200)
+        survivalSimulationBranches = props.int("survivalSimulationBranches", survivalSimulationBranches).coerceIn(64, 2048)
+        deathProbabilityThreshold = props.double("deathProbabilityThreshold", deathProbabilityThreshold).coerceIn(0.50, 1.0)
+        escapeProbabilityTriggerCeiling = props.double("escapeProbabilityTriggerCeiling", escapeProbabilityTriggerCeiling).coerceIn(0.0, 1.0)
+        pendingHomeMonitorMillis = props.long("pendingHomeMonitorMillis", pendingHomeMonitorMillis).coerceIn(1_000L, 60_000L)
     }
 
     private fun JsonObject.bool(key: String, default: Boolean): Boolean = get(key)?.takeIf { it.isJsonPrimitive }?.asString?.toBooleanStrictOrNull() ?: default
@@ -360,5 +383,11 @@ object GrimSaverConfig {
         val moddedProjectileDrag: Double,
         val healthForecastTicks: Int,
         val threatCorrelationWindowTicks: Int,
+        val survivalSimulationTicks: Int,
+        val survivalSimulationBranches: Int,
+        val deathProbabilityThreshold: Double,
+        val escapeProbabilityTriggerCeiling: Double,
+        val survivalHealthThreshold: Double,
+        val pendingHomeMonitorMillis: Long,
     )
 }

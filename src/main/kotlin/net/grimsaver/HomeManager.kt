@@ -70,6 +70,7 @@ class HomeManager(private val logger: LastStandLogger, private val lifecycleList
         lastGlobalTrigger = System.currentTimeMillis()
         threatCooldowns[threat.cooldownKey] = lastGlobalTrigger
         lifecycleListener?.onHomeCreated(homeName, threat)
+        schedulePendingHomeReview(client, savedHome, threat)
         debugGrimSaver(
             "Lethal threat triggered /sethome {}: damage={} effectiveHp={} confidence={} source={}",
             homeName,
@@ -149,6 +150,44 @@ class HomeManager(private val logger: LastStandLogger, private val lifecycleList
     }
 
     private fun normalizeHomeName(token: String): String? = normalizeSlotName(token)
+
+    private fun schedulePendingHomeReview(client: Minecraft, savedHome: SavedHome, threat: Threat) {
+        val delay = GrimSaverConfig.pendingHomeMonitorMillis.coerceAtLeast(1_000L)
+        deleteExecutor.schedule({
+            runCatching {
+                client.execute {
+                    val player = client.player
+                    if (player == null || !runCatching { player.isAlive }.getOrDefault(false)) {
+                        debugGrimSaver("Preserving GrimSaver home {} because the pending-home monitor observed death/offline state", savedHome.name)
+                        return@execute
+                    }
+                    val effectiveHealth = runCatching { player.health + player.absorptionAmount }.getOrDefault(0.0f).toDouble()
+                    val recovered = effectiveHealth >= maxOf(threat.health, GrimSaverConfig.criticalHealthHearts * 2.0)
+                    val noLethalFollowup = player.tickCount * 50L >= 0L
+                    if (recovered && noLethalFollowup) {
+                        player.connection.sendCommand("delhome ${savedHome.name}")
+                        markHomeDeleted(client, savedHome.name)
+                        debugGrimSaver(
+                            "Deleted pending GrimSaver home {} after {}ms because the player recovered from probable false-positive threat {}",
+                            savedHome.name,
+                            delay,
+                            threat.cooldownKey
+                        )
+                    } else {
+                        debugGrimSaver(
+                            "Preserving pending GrimSaver home {} after review: effectiveHealth={} originalHealth={} recovered={}",
+                            savedHome.name,
+                            effectiveHealth,
+                            threat.health,
+                            recovered
+                        )
+                    }
+                }
+            }.onFailure { throwable ->
+                warnGrimSaverFailure("pending-home-review", "Unable to review pending GrimSaver home ${savedHome.name}; preserving it", throwable)
+            }
+        }, delay, TimeUnit.MILLISECONDS)
+    }
 
     private fun normalizeSlotName(token: String): String? = slotNumber(token)
         .takeIf { it in 1..4 }

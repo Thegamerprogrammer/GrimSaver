@@ -27,6 +27,7 @@ class RiskEngine(private val config: GrimSaverConfig = GrimSaverConfig) {
     private val threatRegistry = UniversalThreatRegistry(config, combatAnalyzer)
     private val correlationEngine = ThreatCorrelationEngine(config)
     private val forecastEngine = HealthForecastEngine(config)
+    private val simulationEngine = SimulationEngine(config)
 
     fun assess(snapshot: WorldSnapshot): RiskAssessment {
         val history = healthVelocityTracker.record(snapshot)
@@ -38,6 +39,7 @@ class RiskEngine(private val config: GrimSaverConfig = GrimSaverConfig) {
         val combatWindow = CombatWindow.from(snapshot.player, projectileRisks, allCombatRisks, environmentalDamageSources(snapshot.player))
         val correlatedWindow = correlationEngine.correlate(combatWindow)
         val forecast = forecastEngine.forecast(snapshot.player, correlatedWindow, max(0.5, config.safetyMargin))
+        val survivalForecast = simulationEngine.simulate(snapshot, correlatedWindow)
         val predictedIncomingDamage = correlatedWindow.totalDamageWithin(config.healthForecastTicks)
         val environmentalDamage = correlatedWindow.sources.filter { it.kind == DamageSourceKind.ENVIRONMENT }.sumOf { it.damage }
         val bestProjectile = projectileRisks.maxWithOrNull(compareBy<ProjectileRisk> { it.confidence }.thenBy { it.predictedDamage })
@@ -48,9 +50,15 @@ class RiskEngine(private val config: GrimSaverConfig = GrimSaverConfig) {
         val enchantmentScore = allCombatRisks.maxOfOrNull { it.enchantmentRiskScore } ?: 0.0
         val trajectoryScore = bestProjectile?.confidence ?: 0.0
         val confidence = confidenceModel.confidence(history, burstLevel, damageScore, targetingScore, enchantmentScore, trajectoryScore)
-        val burstOverride = burstLevel.ordinal >= BurstLevel.CRITICAL.ordinal
+        val burstOverride = burstLevel == BurstLevel.LETHAL && survivalForecast.deathProbability >= config.deathProbabilityThreshold
         val healthPredictionLethal = forecast.predictedMinimumHealth <= forecast.survivalThreshold
-        val shouldTrigger = config.enabled && (healthPredictionLethal || burstOverride) && confidence >= confidenceFloor(burstLevel, healthPredictionLethal)
+        val simulationPredictsDeath = survivalForecast.lethalTick != null || survivalForecast.minimumPredictedHealth <= config.survivalHealthThreshold
+        val triggerConfidence = max(confidence, survivalForecast.confidence)
+        val shouldTrigger = config.enabled &&
+            survivalForecast.deathProbability >= config.deathProbabilityThreshold &&
+            survivalForecast.escapeProbability <= config.escapeProbabilityTriggerCeiling &&
+            simulationPredictsDeath &&
+            triggerConfidence >= confidenceFloor(burstLevel, healthPredictionLethal)
         val source = when {
             burstOverride -> "health_burst"
             primaryDamageSource != null -> primaryDamageSource.source
@@ -65,6 +73,7 @@ class RiskEngine(private val config: GrimSaverConfig = GrimSaverConfig) {
         }
         val trace = ThreatTrace(
             forecast = forecast,
+            survivalForecast = survivalForecast,
             combatWindow = correlatedWindow,
             primaryThreat = source,
             secondaryThreat = correlatedWindow.sources
@@ -75,15 +84,15 @@ class RiskEngine(private val config: GrimSaverConfig = GrimSaverConfig) {
             trigger = shouldTrigger
         )
         return RiskAssessment(
-            totalRiskScore = ((damageScore * 0.55) + ((1.0 - forecast.survivalProbability) * 0.45)).coerceIn(0.0, 1.0),
-            confidence = if (burstLevel == BurstLevel.LETHAL) 1.0 else confidence,
+            totalRiskScore = ((damageScore * 0.25) + (survivalForecast.deathProbability * 0.75)).coerceIn(0.0, 1.0),
+            confidence = triggerConfidence,
             burstLevel = burstLevel,
             predictedDamage = if (burstOverride) max(predictedIncomingDamage, snapshot.player.effectiveHealth + config.safetyMargin + 1.0) else predictedIncomingDamage,
             healthVelocity = history.velocity,
-            lethalProbability = if (burstLevel == BurstLevel.LETHAL) 1.0 else (1.0 - forecast.survivalProbability).coerceIn(0.0, 1.0),
+            lethalProbability = survivalForecast.deathProbability,
             primaryThreatSource = source,
             shouldTriggerSetHome = shouldTrigger,
-            predictedRemainingHealth = forecast.predictedMinimumHealth,
+            predictedRemainingHealth = survivalForecast.minimumPredictedHealth,
             environmentalDamage = environmentalDamage,
             sourceEntityId = sourceEntityId,
             forecast = forecast,
@@ -177,6 +186,7 @@ data class RiskAssessment(
     val environmentalDamage: Double = 0.0,
     val sourceEntityId: Int? = null,
     val forecast: HealthForecast? = null,
+    val survivalForecast: SurvivalForecast? = null,
     val trace: ThreatTrace? = null
 ) {
     fun toThreat(snapshot: WorldSnapshot): Threat = Threat(
@@ -184,7 +194,7 @@ data class RiskAssessment(
         damage = max(predictedDamage, snapshot.player.effectiveHealth + GrimSaverConfig.safetyMargin + 1.0),
         health = snapshot.player.effectiveHealth,
         source = primaryThreatSource,
-        reason = "RiskEngine ${burstLevel.name.lowercase()} risk confidence=${(confidence * 100.0).toInt()}% velocity=${"%.2f".format(healthVelocity)} hp/s predicted=${"%.1f".format(predictedDamage)} remaining=${"%.1f".format(predictedRemainingHealth)} env=${"%.1f".format(environmentalDamage)}",
+        reason = "RiskEngine survival forecast death=${"%.1f".format(lethalProbability * 100.0)}% escape=${"%.1f".format((survivalForecast?.escapeProbability ?: 0.0) * 100.0)}% confidence=${(confidence * 100.0).toInt()}% velocity=${"%.2f".format(healthVelocity)} hp/s predicted=${"%.1f".format(predictedDamage)} remaining=${"%.1f".format(predictedRemainingHealth)} env=${"%.1f".format(environmentalDamage)}",
         confidence = confidence,
         position = snapshot.player.position,
         predictedDamage = predictedDamage,
@@ -424,6 +434,7 @@ data class ThreatRejection(
 
 data class ThreatTrace(
     val forecast: HealthForecast,
+    val survivalForecast: SurvivalForecast,
     val combatWindow: CombatWindow,
     val primaryThreat: String,
     val secondaryThreat: String?,

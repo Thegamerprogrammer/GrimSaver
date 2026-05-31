@@ -83,7 +83,8 @@ data class PlayerSnapshot(
     val onGround: Boolean,
     val activeEffects: List<ActiveEffectSnapshot> = emptyList(),
     val fireImmune: Boolean = false,
-    val regenerationPerSecond: Double = 0.0
+    val regenerationPerSecond: Double = 0.0,
+    val inventory: InventorySnapshot = InventorySnapshot()
 ) {
     val effectiveHealth: Double = health + absorption
 }
@@ -139,6 +140,26 @@ data class LivingSnapshot(
     val activeEffects: List<ActiveEffectSnapshot> = emptyList()
 )
 
+data class InventorySnapshot(
+    val hasOffhandTotem: Boolean = false,
+    val hasMainHandTotem: Boolean = false,
+    val placeableBlockCount: Int = 0
+) {
+    val hasTotem: Boolean = hasOffhandTotem || hasMainHandTotem
+    val canPlaceSurvivalBlocks: Boolean = placeableBlockCount > 0
+}
+
+data class TerrainSnapshot(
+    val openEscapeDirections: Int = 0,
+    val blockedDirections: Int = 0,
+    val waterNearby: Boolean = false,
+    val lavaNearby: Boolean = false,
+    val climbableTerrainNearby: Boolean = false,
+    val doorwayOrCorridorNearby: Boolean = false,
+    val lineOfSightBreaksNearby: Int = 0,
+    val hazardDensity: Double = 0.0
+)
+
 data class WorldSnapshot(
     val serverKey: String,
     val dimension: String,
@@ -146,5 +167,6 @@ data class WorldSnapshot(
     val player: PlayerSnapshot,
     val projectiles: List<ProjectileSnapshot>,
     val livingEntities: List<LivingSnapshot>,
+    val terrain: TerrainSnapshot = TerrainSnapshot(),
     val capturedAtMillis: Long = System.currentTimeMillis()
 )
